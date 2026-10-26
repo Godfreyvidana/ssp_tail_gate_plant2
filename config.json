@@ -1,0 +1,15 @@
+{
+    "_comment": "Panel Vision \u2014 Camera + Sequence Configuration. Edit values then restart.",
+    "camera1_url": "rtsp://admin:Vidana_123@192.10.70.188:554/video/live?channel=1&subtype=0",
+    "camera2_url": "rtsp://admin:Vidana_123@192.10.70.192:443/video/live?channel=1&subtype=0",
+    "progress_bar_duration_secs": 10.0,
+    "seq1_normal_frames": 2,
+    "seq1_fallback_frames": 30,
+    "seq2_grace_period": 10.0,
+    "seq3_grace_period": 10.0,
+    "seq2_countdown_duration": 5.0,
+    "seq3_countdown_duration": 5.0,
+    "seq_wipe_seconds": 10.0,
+    "seq_hand_gone_secs": 1.0,
+    "capture_delay_secs": 2.0
+}
