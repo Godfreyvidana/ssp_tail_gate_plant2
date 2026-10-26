@@ -1,0 +1,33 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Logs
+*.log
+startup.log
+startup2.log
+
+# Panel data (images, videos, PDFs, captures - do NOT commit)
+panel_data/
+
+# Temp frames
+temp_frames/
+
+# Unused / experimental model weights
+models/best.pt
+models/serial.pt
+models/yolov11/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# pytest
+.pytest_cache/
