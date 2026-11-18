@@ -241,7 +241,7 @@ DISPLAY_MAP = {
 # ─────────────────────────────────────────────────────────────
 SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR      = os.path.join(SCRIPT_DIR, "models")
-PT_MODEL_PATH   = os.path.join(MODELS_DIR, "SSP_TAILGATE_SEQ_PLANT2-V1.pt")
+PT_MODEL_PATH   = os.path.join(MODELS_DIR, "SSP_BN7I_trunk_seq.pt")
 # Store panel images under the application directory, not the Pi path.
 BASE_STORAGE    = os.path.join(SCRIPT_DIR, "panel_data")
 TEMP_DIR       = os.path.join(SCRIPT_DIR, "temp_frames")
@@ -5487,17 +5487,17 @@ def start_camera():
         # ── Resolve SSP_TAILGATE_SERIAL.pt path absolutely so it works regardless
         # of the process CWD (Flask can be launched from any directory).
         _script_dir       = os.path.dirname(os.path.abspath(__file__))
-        _serial_pt_path   = os.path.join(_script_dir, "models", "SSP_TAILGATE_SERIAL.pt")
+        _serial_pt_path   = os.path.join(_script_dir, "models", "serial_18_11_26.pt")
         if not os.path.exists(_serial_pt_path):
             # Also try the app root models folder if the script is started
             # from a different working directory.
-            _serial_pt_path = os.path.join(SCRIPT_DIR, "models", "SSP_TAILGATE_SERIAL.pt")
+            _serial_pt_path = os.path.join(SCRIPT_DIR, "models", "serial_18_11_26.pt")
         _pt_exists = os.path.exists(_serial_pt_path)
-        print(f'[CAM2-OCR] SSP_TAILGATE_SERIAL.pt path  → {_serial_pt_path}')
-        print(f'[CAM2-OCR] SSP_TAILGATE_SERIAL.pt found → {_pt_exists}')
+        print(f'[CAM2-OCR] serial_18_11_26.pt path  → {_serial_pt_path}')
+        print(f'[CAM2-OCR] serial_18_11_26.pt found → {_pt_exists}')
         if not _pt_exists:
-            print(f'[CAM2-OCR] ❌ CRITICAL: SSP_TAILGATE_SERIAL.pt missing — Camera 2 OCR will NOT work')
-            print(f'[CAM2-OCR] ❌ Copy SSP_TAILGATE_SERIAL.pt to: {os.path.join(SCRIPT_DIR, "models", "SSP_TAILGATE_SERIAL.pt")}')
+            print(f'[CAM2-OCR] ❌ CRITICAL: serial_18_11_26.pt missing — Camera 2 OCR will NOT work')
+            print(f'[CAM2-OCR] ❌ Copy serial_18_11_26.pt to: {os.path.join(SCRIPT_DIR, "models", "serial_18_11_26.pt")}')
         else:
             import os as _os
             sz_mb = round(_os.path.getsize(_serial_pt_path) / (1024*1024), 1)
@@ -5626,10 +5626,10 @@ def upload_video():
 
             # Resolve SSP_TAILGATE_SERIAL.pt path (same logic as /api/start_camera)
             _script_dir       = os.path.dirname(os.path.abspath(__file__))
-            _serial_pt_path   = os.path.join(_script_dir, "models", "SSP_TAILGATE_SERIAL.pt")
+            _serial_pt_path   = os.path.join(_script_dir, "models", "serial_18_11_26.pt")
             if not os.path.exists(_serial_pt_path):
-                _serial_pt_path = os.path.join(SCRIPT_DIR, "models", "SSP_TAILGATE_SERIAL.pt")
-            print(f'[UPLOAD] camera2 upload -> SSP_TAILGATE_SERIAL.pt path {_serial_pt_path} exists={os.path.exists(_serial_pt_path)}')
+                _serial_pt_path = os.path.join(SCRIPT_DIR, "models", "serial_18_11_26.pt")
+            print(f'[UPLOAD] camera2 upload -> serial_18_11_26.pt path {_serial_pt_path} exists={os.path.exists(_serial_pt_path)}')
 
             try:
                 # Use a simple open_cap_fn that opens the saved file via OpenCV
@@ -5808,16 +5808,16 @@ def _generate_cam2_frames():
                     # Check whether file exists to give a precise message
                     _pt_chk = os.path.join(
                         os.path.dirname(os.path.abspath(__file__)),
-                        "models", "SSP_TAILGATE_SERIAL.pt")
+                        "models", "serial_18_11_26.pt")
                     _loading = getattr(camera2_ocr_instance, '_yolo_loading', False)
                     if _loading:
-                        _msg = "SSP_TAILGATE_SERIAL.pt LOADING... please wait"
+                        _msg = "serial_18_11_26.pt LOADING... please wait"
                         _clr = (0, 140, 255)  # orange
                     elif not os.path.exists(_pt_chk):
-                        _msg = f"SSP_TAILGATE_SERIAL.pt MISSING — copy to models/SSP_TAILGATE_SERIAL.pt"
+                        _msg = f"file missing — copy serial_18_11_26.pt to models/"
                         _clr = (0, 0, 220)    # red
                     else:
-                        _msg = "SSP_TAILGATE_SERIAL.pt LOAD FAILED — check terminal for error"
+                        _msg = "serial_18_11_26.pt LOAD FAILED — check terminal for error"
                         _clr = (0, 0, 200)    # dark red
                     # Draw 2-line banner at bottom
                     cv2.rectangle(display, (0, h_f - 60), (w_f, h_f), _clr, -1)
@@ -5952,7 +5952,7 @@ def cam2_status():
         _pt_status = "⏳ loading..."
     else:
         _pt_chk = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "models", "SSP_TAILGATE_SERIAL.pt")
+                               "models", "serial_18_11_26.pt")
         _pt_status = ("❌ file missing — copy SSP_TAILGATE_SERIAL.pt to models/" 
                       if not os.path.exists(_pt_chk) 
                       else "❌ load failed — check terminal")
@@ -6142,7 +6142,7 @@ def serial_status():
     Shows exactly why SSP_TAILGATE_SERIAL.pt may not be loaded.
     """
     _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _pt_path    = os.path.join(_script_dir, "models", "SSP_TAILGATE_SERIAL.pt")
+    _pt_path    = os.path.join(_script_dir, "models", "serial_18_11_26.pt")
     pt_exists   = os.path.exists(_pt_path)
     pt_size_mb  = round(os.path.getsize(_pt_path) / (1024*1024), 1) if pt_exists else 0
 
@@ -6292,9 +6292,9 @@ def diagnostics():
     
     # 1. Check SSP_TAILGATE_SERIAL.pt file
     _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _serial_pt_path = os.path.join(_script_dir, "models", "SSP_TAILGATE_SERIAL.pt")
+    _serial_pt_path = os.path.join(_script_dir, "models", "serial_18_11_26.pt")
     if not os.path.exists(_serial_pt_path):
-        _serial_pt_path = os.path.join(SCRIPT_DIR, "models", "SSP_TAILGATE_SERIAL.pt")
+        _serial_pt_path = os.path.join(SCRIPT_DIR, "models", "serial_18_11_26.pt")
     
     diag['serial_pt_path'] = _serial_pt_path
     diag['serial_pt_exists'] = os.path.exists(_serial_pt_path)
@@ -6461,6 +6461,11 @@ if __name__ == '__main__':
                 config = json.load(f)
                 cam1_url = config.get('camera1_url')
                 cam2_url = config.get('camera2_url')
+                # Load model filenames from config (fall back to hardcoded defaults)
+                _seq_model_name    = config.get('seq_model', 'SSP_BN7I_trunk_seq.pt')
+                _serial_model_name = config.get('serial_model', 'serial_18_11_26.pt')
+                PT_MODEL_PATH = os.path.join(MODELS_DIR, _seq_model_name)
+                print(f"[CONFIG] seq_model={_seq_model_name}  serial_model={_serial_model_name}")
                 SEQ1_NORMAL_FRAMES = config.get('seq1_normal_frames', SEQ1_NORMAL_FRAMES)
                 SEQ1_FALLBACK_FRAMES = config.get('seq1_fallback_frames', SEQ1_FALLBACK_FRAMES)
                 SEQ_WIPE_SECONDS = config.get('seq_wipe_seconds', SEQ_WIPE_SECONDS)
@@ -6489,7 +6494,7 @@ if __name__ == '__main__':
                             print(f"[AUTO-START] CAM1 configured")
                         if _CAM2_OCR_AVAILABLE and cam2_url:
                             _camera2_url = cam2_url
-                            _serial_pt = os.path.join(SCRIPT_DIR, "models", "SSP_TAILGATE_SERIAL.pt")
+                            _serial_pt = os.path.join(SCRIPT_DIR, "models", _serial_model_name)
                             def _on_serial(s):
                                 if s and s not in (None, 'UNKNOWN', 'Searching...'):
                                     state.serial_number = s
