@@ -2,6 +2,8 @@
     "_comment": "Panel Vision \u2014 Camera + Sequence Configuration. Edit values then restart.",
     "camera1_url": "rtsp://admin:Vidana_123@192.10.70.188:554/video/live?channel=1&subtype=0",
     "camera2_url": "rtsp://admin:Vidana_123@192.10.70.192:443/video/live?channel=1&subtype=0",
+    "seq_model": "SSP_BN7I_trunk_seq.pt",
+    "serial_model": "serial_18_11_26.pt",
     "progress_bar_duration_secs": 10.0,
     "seq1_normal_frames": 2,
     "seq1_fallback_frames": 30,
