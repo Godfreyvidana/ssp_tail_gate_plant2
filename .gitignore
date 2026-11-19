@@ -29,5 +29,19 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Debug files & test scripts
+debug_*.jpg
+debug_*.png
+test_*.py
+
+# Experimental / scratch
+models/New/
+serial_captures/
+
 # pytest
 .pytest_cache/

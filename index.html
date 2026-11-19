@@ -943,20 +943,20 @@
                     <div style="display:flex; gap:0; margin-bottom:12px;
                                 border:1px solid #1a237e; border-radius:6px;
                                 overflow:hidden;">
-                        <button id="btnLocal" onclick="switchSource('local')" style="flex:1; padding:7px 0; font-size:11px;
-                                       font-weight:600; border:none; cursor:pointer;
-                                       background:#1a237e; color:#fff;">
-                            📷 Local Camera
-                        </button>
                         <button id="btnLan" onclick="switchSource('lan')" style="flex:1; padding:7px 0; font-size:11px;
                                        font-weight:600; border:none; cursor:pointer;
+                                       background:#1a237e; color:#fff;">
+                            🌐 IP Camera (RTSP)
+                        </button>
+                        <button id="btnLocal" onclick="switchSource('local')" style="flex:1; padding:7px 0; font-size:11px;
+                                       font-weight:600; border:none; cursor:pointer;
                                        background:#fff; color:#1a237e;">
-                            🌐 IP Camera
+                            📷 Local USB
                         </button>
                     </div>
 
                     <!-- ── LOCAL CAMERA SECTION ─────────────────── -->
-                    <div id="localSection">
+                    <div id="localSection" style="display:none;">
                         <div class="form-group">
                             <label class="form-label">Camera Index</label>
                             <select class="form-select" id="localCameraSelect">
@@ -968,7 +968,7 @@
                         <div class="cam2-url-section">
                             <label class="form-label">🎯 OCR Camera URL <span style="font-weight:400;color:#9e9e9e;">(Camera-2)</span></label>
                             <input type="text" class="form-input" id="camera2UrlLocal"
-                                value="rtsp://admin:Vidana_123@192.10.70.192:554/video/live?channel=1&amp;subtype=0"
+                                value="rtsp://admin:Vidana_123@192.10.70.69:554/video/live?channel=1&amp;subtype=0"
                                 placeholder="rtsp://user:pass@ip:554/path"
                                 style="font-size:10px;">
                             <div style="font-size:9px;color:#9e9e9e;margin-top:3px;">Optional — for serial number OCR overlay</div>
@@ -977,35 +977,35 @@
                     </div>
 
                     <!-- ── IP CAMERA SECTION (CP Plus) ──────────── -->
-                    <div id="lanSection" style="display:none;">
+                    <div id="lanSection" style="display:block;">
 
                         <div class="form-group">
-                            <label class="form-label">Camera IP</label>
-                            <input type="text" class="form-input" id="cameraIP" placeholder="192.168.1.100"
+                            <label class="form-label">Camera 1 IP (Sequence Camera)</label>
+                            <input type="text" class="form-input" id="cameraIP" value="192.10.70.70" placeholder="192.10.70.70"
                                 oninput="updateRtspPreview()">
                         </div>
 
                         <div class="form-group">
                             <label class="form-label">Port</label>
-                            <input type="text" class="form-input" id="rtspPort" value="443"
+                            <input type="text" class="form-input" id="rtspPort" value="554"
                                 oninput="updateRtspPreview()">
                         </div>
 
                         <div class="form-group">
                             <label class="form-label">Username</label>
-                            <input type="text" class="form-input" id="adminUsername" placeholder="admin"
+                            <input type="text" class="form-input" id="adminUsername" value="admin" placeholder="admin"
                                 oninput="updateRtspPreview()">
                         </div>
 
                         <div class="form-group">
                             <label class="form-label">Password</label>
-                            <input type="password" class="form-input" id="adminPassword" oninput="updateRtspPreview()">
+                            <input type="password" class="form-input" id="adminPassword" value="Vidana_123" oninput="updateRtspPreview()">
                         </div>
 
                         <div class="form-group">
                             <label class="form-label">Channel</label>
                             <select class="form-select" id="streamChannel" onchange="updateRtspPreview()">
-                                <option value="1">Channel 1</option>
+                                <option value="1" selected>Channel 1</option>
                                 <option value="2">Channel 2</option>
                                 <option value="3">Channel 3</option>
                                 <option value="4">Channel 4</option>
@@ -1015,8 +1015,8 @@
                         <div class="form-group">
                             <label class="form-label">Stream Type</label>
                             <select class="form-select" id="streamType" onchange="updateRtspPreview()">
-                                <option value="0">Main Stream (Full HD)</option>
-                                <option value="1" selected>Sub Stream (Smooth)</option>
+                                <option value="0" selected>Main Stream (Full HD - subtype=0)</option>
+                                <option value="1">Sub Stream (subtype=1)</option>
                             </select>
                         </div>
 
@@ -1027,12 +1027,12 @@
                             word-break:break-all; display:none;"></div>
 
                         <div class="cam2-url-section">
-                            <label class="form-label">🎯 Serial Number Camera URL <span style="font-weight:400;color:#9e9e9e;">(Camera-2)</span></label>
+                            <label class="form-label">🎯 Camera 2 URL (Serial Number Camera)</label>
                             <input type="text" class="form-input" id="camera2UrlLan"
-                                value="rtsp://admin:Vidana_123@192.10.70.192:443/video/live?channel=1&amp;subtype=0"
-                                placeholder="rtsp://user:pass@ip:443/path"
+                                value="rtsp://admin:Vidana_123@192.10.70.69:554/video/live?channel=1&amp;subtype=0"
+                                placeholder="rtsp://admin:Vidana_123@192.10.70.69:554/video/live?channel=1&amp;subtype=0"
                                 style="font-size:10px;">
-                            <div style="font-size:9px;color:#9e9e9e;margin-top:3px;">Optional — for serial number detection</div>
+                            <div style="font-size:9px;color:#9e9e9e;margin-top:3px;">Serial Number OCR Camera (192.10.70.69)</div>
                         </div>
                         <div style="display:flex; gap:6px; flex-direction:column; margin-top:10px;">
                             <button class="btn btn-secondary" id="testConnectionBtn">
@@ -1056,13 +1056,13 @@
                     <div class="placeholder-text">Select video source</div>
                 </div>
                 <video id="videoFeed" autoplay playsinline muted
-                    style="display:none;width:100%;height:100%;object-fit:fill;"></video>
-                <img id="mjpegFeed" style="display:none;width:100%;height:100%;object-fit:fill;" alt="video feed">
+                    style="display:none;width:100%;height:100%;object-fit:contain;background:#000;"></video>
+                <img id="mjpegFeed" style="display:none;width:100%;height:100%;object-fit:contain;background:#000;" alt="video feed">
                 <canvas id="overlayCanvas"></canvas>
             </div>
 
             <!-- CAMERA-2 OVERLAY — top-right corner, above main feed -->
-            <div class="cam2-overlay-container" id="cam2OverlayContainer" style="display: none !important;">
+            <div class="cam2-overlay-container" id="cam2OverlayContainer">
                 <div class="cam2-video-wrapper">
                     <span class="cam2-chip-label">📷 Serial Number View Port</span>
                     <img id="cam2Feed" src="" alt="Serial Number View Port"
@@ -1356,7 +1356,7 @@
             try {
                 showLoading('Starting local camera...');
                 const deviceId   = parseInt(document.getElementById('localCameraSelect').value) || 0;
-                const cam2Url    = (document.getElementById('camera2UrlLocal')?.value || '').trim();
+                const cam2Url    = (document.getElementById('camera2UrlLocal')?.value || 'rtsp://admin:Vidana_123@192.10.70.69:554/video/live?channel=1&subtype=0').trim();
                 const res = await fetch('/api/start_camera', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1379,10 +1379,10 @@
 
         // ── LAN camera helpers ────────────────────────────────────────
         function buildRtspUrl() {
-            const ip = (document.getElementById('cameraIP').value || '').trim();
+            const ip = (document.getElementById('cameraIP').value || '192.10.70.70').trim();
             const port = (document.getElementById('rtspPort').value || '554').trim();
-            const user = (document.getElementById('adminUsername').value || '').trim();
-            const pass = (document.getElementById('adminPassword').value || '').trim();
+            const user = (document.getElementById('adminUsername').value || 'admin').trim();
+            const pass = (document.getElementById('adminPassword').value || 'Vidana_123').trim();
             const channel = (document.getElementById('streamChannel').value || '1');
             const subtype = (document.getElementById('streamType').value || '0');
             if (!ip) return '';
@@ -1442,7 +1442,7 @@
                     showAlert('Please enter camera IP address', 'error');
                     return;
                 }
-                const cam2Url = (document.getElementById('camera2UrlLan')?.value || '').trim();
+                const cam2Url = (document.getElementById('camera2UrlLan')?.value || 'rtsp://admin:Vidana_123@192.10.70.69:554/video/live?channel=1&subtype=0').trim();
                 // FIX O4c: persist URLs so they survive page refresh
                 const cam1Val = (document.getElementById('cameraUrlLan')?.value || '').trim();
                 if (cam1Val) localStorage.setItem('pv_cam1_url', cam1Val);
@@ -1489,7 +1489,7 @@
             const parent = mjpeg.parentNode;
             const newImg = document.createElement('img');
             newImg.id = 'mjpegFeed';
-            newImg.style.cssText = 'display:block;width:100%;height:100%;object-fit:fill;';
+            newImg.style.cssText = 'display:block;width:100%;height:100%;object-fit:contain;background:#000;';
             newImg.alt = 'video feed';
             newImg.src = '/api/video_feed?' + Date.now();
             parent.replaceChild(newImg, mjpeg);
@@ -1965,16 +1965,19 @@
         document.addEventListener('DOMContentLoaded', () => {
             if (!animFrameId) animateProgress();
 
-            // FIX O4a: restore camera URLs from localStorage so fields are
-            // pre-filled after every page refresh.
-            const _s1 = localStorage.getItem('pv_cam1_url');
-            const _s2 = localStorage.getItem('pv_cam2_url');
-            if (_s1) { const e = document.getElementById('cameraUrlLan');    if (e && !e.value) e.value = _s1; }
-            if (_s2) {
-                ['camera2UrlLan','camera2UrlLocal'].forEach(id => {
-                    const e = document.getElementById(id); if (e && !e.value) e.value = _s2;
-                });
-            }
+            // Fixed camera URLs (Seq Cam: 192.10.70.70:554, Serial Cam: 192.10.70.69:554)
+            const _fixedSeqUrl = 'rtsp://admin:Vidana_123@192.10.70.70:554/video/live?channel=1&subtype=0';
+            const _fixedSerialUrl = 'rtsp://admin:Vidana_123@192.10.70.69:554/video/live?channel=1&subtype=0';
+            ['camera2UrlLan','camera2UrlLocal'].forEach(id => {
+                const e = document.getElementById(id); if (e) e.value = _fixedSerialUrl;
+            });
+            if (document.getElementById('cameraIP')) document.getElementById('cameraIP').value = '192.10.70.70';
+            if (document.getElementById('rtspPort')) document.getElementById('rtspPort').value = '554';
+            if (document.getElementById('adminUsername')) document.getElementById('adminUsername').value = 'admin';
+            if (document.getElementById('adminPassword')) document.getElementById('adminPassword').value = 'Vidana_123';
+            localStorage.setItem('pv_cam1_url', _fixedSeqUrl);
+            localStorage.setItem('pv_cam2_url', _fixedSerialUrl);
+            updateRtspPreview();
 
             // FIX 1+5: Start polling immediately on page load.
             startStatusPolling();

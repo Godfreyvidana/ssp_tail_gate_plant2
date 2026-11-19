@@ -30,6 +30,7 @@ print("="*62 + "\n")
 import os
 import sys
 import re
+import shutil
 
 # FIX: Limit multi-threading for PaddleOCR and PyTorch so they don't starve the stream CPU
 os.environ['OMP_NUM_THREADS'] = '2'
@@ -37,6 +38,8 @@ os.environ['OPENBLAS_NUM_THREADS'] = '2'
 os.environ['MKL_NUM_THREADS'] = '2'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '2'
 os.environ['NUMEXPR_NUM_THREADS'] = '2'
+
+FFMPEG_BIN = shutil.which('ffmpeg') or (r'C:\ffmpeg\bin\ffmpeg.exe' if os.path.isfile(r'C:\ffmpeg\bin\ffmpeg.exe') else 'ffmpeg')
 
 import cv2
 import threading
@@ -281,7 +284,7 @@ def _detect_ffmpeg_hwaccel():
     - software â everything else:              pure libavcodec
     """
     try:
-        r   = subprocess.run(['ffmpeg', '-hwaccels'],
+        r   = subprocess.run([FFMPEG_BIN, '-hwaccels'],
                              capture_output=True, text=True, timeout=4)
         out = r.stdout.lower()
         is_arm = ('arm' in platform.machine().lower() or
@@ -344,6 +347,13 @@ class SerialYOLODetector:
 
         self._device = 'cuda:0' if self._cuda_usable() else 'cpu'
         self.model   = YOLO(pt_path)
+        if self._device != 'cpu':
+            try:
+                self.model.to(self._device)
+                print(f"[CAM2-YOLO] YOLO model moved to {self._device} (model.device={self.model.device})")
+            except Exception as e:
+                print(f"[CAM2-YOLO] Failed moving model to {self._device}: {e}. Falling back to CPU.")
+                self._device = 'cpu'
 
         try:
             self.model.predict(
@@ -353,6 +363,10 @@ class SerialYOLODetector:
             if self._device != 'cpu':
                 print(f"[CAM2-YOLO] CUDA warmup failed: {e}. Falling back to CPU.")
                 self._device = 'cpu'
+                try:
+                    self.model.to('cpu')
+                except Exception:
+                    pass
                 self.model.predict(
                     source=__import__('numpy').zeros((640, 640, 3), dtype='uint8'),
                     device='cpu', verbose=False)
@@ -383,6 +397,7 @@ class SerialYOLODetector:
             results = self.model.predict(
                 source=frame_bgr,
                 device=self._device,
+                imgsz=448,
                 conf=self.CONF_THRESHOLD,
                 verbose=False)
             dets = []
@@ -459,7 +474,7 @@ class _FFmpegCapture:
     @staticmethod
     def _parse_host(url):
         m=re.search(r'@([^:/]+)',url)
-        return m.group(1) if m else '192.10.70.192'
+        return m.group(1) if m else '192.10.70.69'
 
     def _start_tls_proxy(self):
         import ssl, socket as _s
@@ -507,74 +522,31 @@ class _FFmpegCapture:
         # FIX 4: Remove select.select() — broken on Windows pipes
         #        (Windows select only works on sockets, not pipes)
         #        Rely on -stimeout to terminate readinto() instead.
-        _ffmpeg = FFMPEG_BIN if FFMPEG_BIN else 'ffmpeg'
-        cmd = [_ffmpeg,
-               '-reconnect',          '1',
-               '-reconnect_streamed', '1',
-               '-reconnect_delay_max','2',
-               '-stimeout',           '5000000',
-               '-y', '-loglevel', 'warning',
-               '-rtsp_transport', 'tcp',
-               '-fflags',  'nobuffer+discardcorrupt',
-               '-flags',   'low_delay',
-               '-i',       self._connect_url,
-               '-vf',      f'scale={self.width}:{self.height},format=bgr24',
-               '-vcodec',  'rawvideo',
-               '-f',       'rawvideo',
-               '-r',       '10',
-               '-vsync',   '0',
-               '-an', '-sn', '-dn', 'pipe:1']
-
-        _buf = bytearray(self.frame_size)
-        _mv  = memoryview(_buf)
-
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|max_delay;50000"
         while self.running:
             try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=self.frame_size)
-
-                import threading as _thr
-                def _drain_err(p):
-                    try:
-                        for raw in p.stderr:
-                            line = raw.decode('utf-8', errors='ignore').strip()
-                            if line:
-                                print(f'[CAM2-FFMPEG] {line}')
-                    except Exception:
-                        pass
-                _thr.Thread(target=_drain_err, args=(proc,), daemon=True).start()
-
-                failures = 0
+                cap = cv2.VideoCapture(self._connect_url, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if not cap.isOpened():
+                    time.sleep(1.0)
+                    continue
+                fails = 0
                 while self.running:
-                    n = 0
-                    try:
-                        while n < self.frame_size:
-                            got = proc.stdout.readinto(_mv[n:])
-                            if not got:
-                                break
-                            n += got
-                    except Exception:
-                        failures += 1
-                        n = 0
-
-                    if n != self.frame_size:
-                        failures += 1
-                        if failures >= 10:
-                            print(f'[CAM2] {failures} bad frames — reconnecting')
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        fails += 1
+                        if fails >= 40:
+                            print(f'[CAM2] {fails} bad frames — reconnecting')
                             break
-                        time.sleep(0.01)
+                        time.sleep(0.02)
                         continue
-
-                    failures = 0
-                    frm = np.frombuffer(_buf, dtype=np.uint8).reshape(
-                        (self.height, self.width, 3)).copy()
+                    fails = 0
                     with self._lock:
-                        self._latest = frm
-
-                proc.kill()
+                        self._latest = frame
+                try:
+                    cap.release()
+                except Exception:
+                    pass
             except Exception as e:
                 print(f'[CAM2] _loop error: {e}')
             time.sleep(0.5)
@@ -742,24 +714,24 @@ class Camera2OCR:
             """
             import sys
             # ââ Step 1: Explicit path check before attempting load âââââââââââââ
+            _mname = os.path.basename(_pt_path_ref) if _pt_path_ref else "model"
             if not _pt_path_ref:
-                print('[CAM2] â SSP_TAILGATE_SERIAL.pt path is None â OCR disabled', flush=True)
+                print('[CAM2] ❌ Serial model path is None — OCR disabled', flush=True)
                 self._yolo_loading = False
                 return
             if not os.path.exists(_pt_path_ref):
-                print(f'[CAM2] â SSP_TAILGATE_SERIAL.pt NOT FOUND: {_pt_path_ref}', flush=True)
-                print('[CAM2] â â Place SSP_TAILGATE_SERIAL.pt inside the models/ folder next to app_vision.py', flush=True)
+                print(f'[CAM2] ❌ Serial model NOT FOUND: {_pt_path_ref}', flush=True)
                 self._yolo_loading = False
                 return
-            print(f'[CAM2] ð Loading SSP_TAILGATE_SERIAL.pt: {_pt_path_ref}', flush=True)
-            # ââ Step 2: Load model âââââââââââââââââââââââââââââââââââââââââââââ
+            print(f'[CAM2] 🔄 Loading serial model: {_pt_path_ref}', flush=True)
+            # ── Step 2: Load model ───────────────────────────────────────
             try:
                 det = SerialYOLODetector(_pt_path_ref)
                 self.serial_detector = det
-                print(f'[CAM2] â Serial YOLO loaded â device={det._device}', flush=True)
-                print(f'[CAM2] â SSP_TAILGATE_SERIAL.pt ready â annotations will appear on Camera 2', flush=True)
+                print(f'[CAM2] ✅ Serial YOLO loaded — device={det._device}', flush=True)
+                print(f'[CAM2] ✅ {_mname} ready — annotations will appear on Camera 2', flush=True)
             except Exception as e:
-                print(f'[CAM2] â SSP_TAILGATE_SERIAL.pt FAILED to load: {e}', flush=True)
+                print(f'[CAM2] ❌ {_mname} FAILED to load: {e}', flush=True)
                 import traceback; traceback.print_exc()
                 print('[CAM2] â OCR disabled â check ultralytics is installed: pip install ultralytics', flush=True)
             self._yolo_loading = False
@@ -772,18 +744,9 @@ class Camera2OCR:
             import traceback
             print("[CAM2] Initializing PaddleOCR...", flush=True)
             print(f"[CAM2] INIT INSTANCE id(self)={id(self)}", flush=True)
-            # ── TASK 5: Safe GPU→CPU fallback ──────────────────────────────
-            try:
-                import paddle as _paddle
-                _gpu_available = _paddle.device.is_compiled_with_cuda()
-            except Exception:
-                _gpu_available = False
-            _device_type = "gpu" if _gpu_available else "cpu"
-            if _gpu_available:
-                print("[OCR] Using GPU (PaddleOCR)", flush=True)
-            else:
-                print("[OCR] Using CPU (PaddleOCR — CUDA not available or Paddle not GPU build)",
-                      flush=True)
+            # ── TASK: Explicitly enforce CPU for OCR as configured ─────────
+            _device_type = "cpu"
+            print("[OCR] Using CPU (PaddleOCR enforced for CPU)", flush=True)
             try:
                 from paddleocr import PaddleOCR
                 self.paddle_reader = PaddleOCR(
@@ -811,7 +774,7 @@ class Camera2OCR:
                             use_textline_orientation=True,
                             lang='en',
                             enable_mkldnn=False,
-                            ocr_version="PP-OCRv5",
+                            ocr_version="PP-OCRv4",
                             device="cpu"
                         )
                         print("[OCR] Using CPU (fallback after GPU failure)", flush=True)
@@ -1375,8 +1338,9 @@ class Camera2OCR:
         if not self._frame_is_valid(frame, min_sharp=5.0):
             return
 
-        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        # Fast sharpness on crop to avoid 60ms CPU freeze per frame
+        crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop is not None and crop.size > 0 else cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (320, 240))
+        sharp = float(cv2.Laplacian(crop_gray, cv2.CV_32F).var())
         ts    = datetime.now().strftime("%H%M%S")
         os.makedirs(folder, exist_ok=True)
 
@@ -1513,28 +1477,30 @@ class Camera2OCR:
                 print(f"[CAM2] ð¸ serial_captures/ slot 2 â extra crop saved "
                       f"sharp={sharp:.0f}")
 
-        # Run live OCR on each slot immediately
+        # Run live OCR on each slot asynchronously so camera loop NEVER freezes
         if _PADDLE_OK and self.paddle_reader is not None:
-            print(f"[CAM2] ð Live OCR on slot {n} ...")
-            try:
-                # Use exact reference _ocr_pipeline (2DFilter then Otsu)
-                slot_serial = self._ocr_pipeline(crop)
-                if slot_serial:
-                    print(f"[CAM2] ð¬ Slot {n} reading: '{slot_serial}'")
-                    with self._lock:
-                        self.partial_serial = slot_serial
-                        self.status = f"Slot {n}: {slot_serial}"
-                else:
-                    print(f"[CAM2] â ï¸  Slot {n}: no serial extracted yet")
+            def _async_slot_ocr(slot_crop, slot_n, slot_dir, slot_ts, slot_sharp):
+                print(f"[CAM2] [ASYNC-OCR] Slot {slot_n} started...", flush=True)
+                try:
+                    slot_serial = self._ocr_pipeline(slot_crop)
+                    if slot_serial:
+                        print(f"[CAM2] [ASYNC-OCR] Slot {slot_n} result: '{slot_serial}'", flush=True)
+                        with self._lock:
+                            self.partial_serial = slot_serial
+                            self.status = f"Slot {slot_n}: {slot_serial}"
+                    else:
+                        print(f"[CAM2] [ASYNC-OCR] Slot {slot_n}: no serial extracted", flush=True)
 
-                # Save slot OCR detail to serial_captures/
-                ocr_txt = os.path.join(serial_dir, f"Slot_{n}_OCR.txt")
-                with open(ocr_txt, "w", encoding="utf-8") as f:
-                    f.write(f"Slot {n} OCR  sharp={sharp:.0f}  ts={ts}\n")
-                    f.write("\n".join(live_lines))
-                    f.write(f"\n\nExtracted: {slot_serial}\n")
-            except Exception as e:
-                print(f"[CAM2] Live OCR error: {e}")
+                    ocr_txt = os.path.join(slot_dir, f"Slot_{slot_n}_OCR.txt")
+                    with open(ocr_txt, "w", encoding="utf-8") as f:
+                        f.write(f"Slot {slot_n} OCR  sharp={slot_sharp:.0f}  ts={slot_ts}\n")
+                        f.write(f"\nExtracted: {slot_serial}\n")
+                except Exception as e:
+                    print(f"[CAM2] Async Live OCR error: {e}", flush=True)
+
+            threading.Thread(target=_async_slot_ocr,
+                             args=(crop.copy(), n, serial_dir, ts, sharp),
+                             daemon=True).start()
 
     def _all_slots_filled(self) -> bool:
         return all(self._slots_saved)
@@ -1799,11 +1765,13 @@ class Camera2OCR:
             
             # Save debug image
             if self.panel_folder and self.panel_folder != ".":
-                import os
-                cv2.imwrite(
-                    os.path.join(self.panel_folder, "debug_ocr_input.jpg"),
-                    img_in
-                )
+                try:
+                    cv2.imwrite(
+                        os.path.join(self.panel_folder, "debug_ocr_input.jpg"),
+                        img_in
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             import traceback
             err_msg = f"[{ts}] {iw}x{ih} EXCEPTION: {e}\n{traceback.format_exc()}"
@@ -2174,29 +2142,30 @@ class Camera2OCR:
                         print(f"[CAM2-OCR]    _is_scanning={self._is_scanning}",
                               flush=True)
 
-                    elapsed = time.time() - self._scan_start_ts_ref[0]
-                    try:
-                        if self._ocr_crop_queue.full():
-                            self._ocr_crop_queue.get_nowait()
-                        # CHANGE 4: item is a dict — carries panel context
-                        # so OCR worker always uses the folder/session that
-                        # was active at CAPTURE time, not at RECEIVE time.
-                        _item = {
-                            'crop':          crop.copy(),
-                            'frame':         frame.copy(),
-                            'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                            'elapsed':       elapsed,
-                            'panel_id':      self._current_panel_id,
-                            'panel_folder':  self.panel_folder,
-                            'session_id':    self._panel_session_id,
-                            'capture_ts':    time.time(),
-                        }
-                        self._ocr_crop_queue.put_nowait(_item)
-                        print(f"[CAM2] Crop queued  session={self._panel_session_id}"
-                              f"  folder={os.path.basename(self.panel_folder or '?')}"
-                              f"  Queue={self._ocr_crop_queue.qsize()}", flush=True)
-                    except Exception as e:
-                        print(f"[CAM2-YOLO] Queue push error: {e}")
+                    _now = time.time()
+                    if self._ocr_crop_queue.empty() and (_now - getattr(self, '_last_ocr_push_ts', 0.0) >= 0.4):
+                        self._last_ocr_push_ts = _now
+                        elapsed = _now - self._scan_start_ts_ref[0]
+                        try:
+                            # CHANGE 4: item is a dict — carries panel context
+                            # so OCR worker always uses the folder/session that
+                            # was active at CAPTURE time, not at RECEIVE time.
+                            _item = {
+                                'crop':          crop.copy(),
+                                'frame':         frame.copy(),
+                                'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+                                'elapsed':       elapsed,
+                                'panel_id':      self._current_panel_id,
+                                'panel_folder':  self.panel_folder,
+                                'session_id':    self._panel_session_id,
+                                'capture_ts':    _now,
+                            }
+                            self._ocr_crop_queue.put_nowait(_item)
+                            print(f"[CAM2] Crop queued  session={self._panel_session_id}"
+                                  f"  folder={os.path.basename(self.panel_folder or '?')}"
+                                  f"  Queue={self._ocr_crop_queue.qsize()}", flush=True)
+                        except Exception as e:
+                            print(f"[CAM2-YOLO] Queue push error: {e}")
                 elif detected and crop is not None and not self._is_scanning:
                     print(f"[CAM2-YOLO] Detection ready but _is_scanning=False (waiting for start_ocr)")
                 elif not detected:
@@ -2214,8 +2183,7 @@ class Camera2OCR:
 
     def _main_loop(self):
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-            "rtsp_transport;tcp|probesize;32|"
-            "analyzeduration;0|fifo_size;50000")
+            "rtsp_transport;tcp|fifo_size;50000")
         
         print(f"[CAM2-MAINLOOP] Starting frame reader for: {self.url[:80] if self.url else 'Not set'}")
         
@@ -2324,7 +2292,7 @@ class Camera2OCR:
                 # ââ Not scanning â skip slot/OCR logic ââââââââ
                 if not self._is_scanning:
                     _scan_active = False
-                    time.sleep(0.02)
+                    time.sleep(0.002)
                     continue
 
                 # ââ Folder guard ââââââââââââââââââââââââââââââ
@@ -2461,12 +2429,13 @@ class Camera2OCR:
                 while self.running:
                     _raw = None
                     try:
-                        # 1. Log queue state before blocking
-                        print(
-                            f"[CAM2-OCR] Waiting for crop "
-                            f"Queue={self._ocr_crop_queue.qsize()}",
-                            flush=True
-                        )
+                        # 1. Log queue state before blocking (only if queue has items)
+                        if self._ocr_crop_queue.qsize() > 0:
+                            print(
+                                f"[CAM2-OCR] Crop queue ready: "
+                                f"Queue={self._ocr_crop_queue.qsize()}",
+                                flush=True
+                            )
 
                         # 2. Block until a crop arrives (1s timeout to check running)
                         try:
@@ -2533,12 +2502,19 @@ class Camera2OCR:
                             self._ocr_crop_queue.task_done()   # TASK 2: always task_done
                             continue
 
-                        # 5. Resize 2x
+                        # 5. Smart resize for OCR speed and accuracy
                         _frame += 1
                         ch, cw = crop.shape[:2]
                         import cv2 as _cv2
-                        ocr_input = _cv2.resize(crop, (cw * 2, ch * 2),
-                                                interpolation=_cv2.INTER_CUBIC)
+                        if ch < 32:
+                            ocr_input = _cv2.resize(crop, (cw * 2, ch * 2),
+                                                    interpolation=_cv2.INTER_CUBIC)
+                        elif ch > 80:
+                            scale = 64.0 / ch
+                            ocr_input = _cv2.resize(crop, (max(16, int(cw * scale)), 64),
+                                                    interpolation=_cv2.INTER_AREA)
+                        else:
+                            ocr_input = crop
 
                         # 6. Call PaddleOCR
                         if self.paddle_reader is None:

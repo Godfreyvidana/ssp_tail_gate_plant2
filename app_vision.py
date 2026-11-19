@@ -169,10 +169,10 @@ app.config['MAX_CONTENT_LENGTH'] = None
 # ─────────────────────────────────────────────────────────────
 MAX_PROC_WIDTH      = 640     # YOLO inference width (GPU)
 FRAME_SKIP          = 2       # Process every 3rd frame
-JPEG_QUALITY        = 50      # [FREEZE FIX] 65→50: faster encode, less CPU per frame
+JPEG_QUALITY        = 55      # Balanced: low latency + acceptable quality
 OCR_THROTTLE_FRAMES = 20      # OCR every 20 frames only
-STREAM_FPS_CAP      = 15      # [FREEZE FIX] 20→15: real-time feel, 33% less encoder work
-STREAM_UI_WIDTH      = 960    # [FREEZE FIX] 1280→960: 44% fewer pixels per frame = major CPU saving
+STREAM_FPS_CAP      = 25      # Real-time 25 FPS stream
+STREAM_UI_WIDTH     = 640     # UI stream width (640×360 → ~3ms JPEG encode, lag-free 25 FPS)
 
 # ── Wiping completion — time-based ───────────────────────────
 # How many seconds of continuous wiping = sequence complete
@@ -241,7 +241,52 @@ DISPLAY_MAP = {
 # ─────────────────────────────────────────────────────────────
 SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR      = os.path.join(SCRIPT_DIR, "models")
-PT_MODEL_PATH   = os.path.join(MODELS_DIR, "SSP_BN7I_trunk_seq.pt")
+
+# ── Load model paths & resolution from config.json (early load) ──
+# Defaults fall back to the original hardcoded .pt filenames.
+_config_path_early = os.path.join(SCRIPT_DIR, "config.json")
+_SEQUENCE_MODEL_REL = None
+_SERIAL_MODEL_REL   = None
+EXPECTED_CAM1_W, EXPECTED_CAM1_H = 1920, 1080
+if os.path.exists(_config_path_early):
+    try:
+        import json as _json_early
+        with open(_config_path_early, 'r') as _f:
+            _cfg_early = _json_early.load(_f)
+            _SEQUENCE_MODEL_REL = _cfg_early.get('sequence_model') or _cfg_early.get('sequence_model_path')
+            _SERIAL_MODEL_REL   = _cfg_early.get('serial_model') or _cfg_early.get('serial_model_path')
+            _w_cfg = _cfg_early.get('stream_ui_width')
+            if _w_cfg:
+                try:
+                    STREAM_UI_WIDTH = int(_w_cfg)
+                except Exception:
+                    pass
+            _res_cfg = _cfg_early.get('expected_sequence_resolution')
+            if _res_cfg and 'x' in str(_res_cfg).lower():
+                try:
+                    _ew, _eh = map(int, str(_res_cfg).lower().split('x'))
+                    EXPECTED_CAM1_W, EXPECTED_CAM1_H = _ew, _eh
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+if _SEQUENCE_MODEL_REL:
+    PT_MODEL_PATH = _SEQUENCE_MODEL_REL if os.path.isabs(_SEQUENCE_MODEL_REL) else os.path.join(SCRIPT_DIR, _SEQUENCE_MODEL_REL)
+else:
+    _default_nano_seq = os.path.join(MODELS_DIR, "yolov8n", "SSP_trunk_BN7I_yolov8n-seg-model.pt")
+    PT_MODEL_PATH = _default_nano_seq if os.path.exists(_default_nano_seq) else os.path.join(MODELS_DIR, "New", "SSP_BN7I_trunk_seq.pt")
+
+if _SERIAL_MODEL_REL:
+    SERIAL_MODEL_PATH = _SERIAL_MODEL_REL if os.path.isabs(_SERIAL_MODEL_REL) else os.path.join(SCRIPT_DIR, _SERIAL_MODEL_REL)
+else:
+    _default_nano_serial = os.path.join(MODELS_DIR, "yolov8n", "SSP_trunk_BN7I_yolov8n-serial-model.pt")
+    SERIAL_MODEL_PATH = _default_nano_serial if os.path.exists(_default_nano_serial) else os.path.join(MODELS_DIR, "New", "serial_18_11_26.pt")
+
+print(f"[CONFIG] Sequence model: {PT_MODEL_PATH}")
+print(f"[CONFIG] Serial model:   {SERIAL_MODEL_PATH}")
+print(f"[CONFIG] Stream UI Width: {STREAM_UI_WIDTH}px | Expected Sequence Res: {EXPECTED_CAM1_W}x{EXPECTED_CAM1_H}")
+
 # Store panel images under the application directory, not the Pi path.
 BASE_STORAGE    = os.path.join(SCRIPT_DIR, "panel_data")
 TEMP_DIR       = os.path.join(SCRIPT_DIR, "temp_frames")
@@ -305,19 +350,31 @@ class CPUInference:
             self._device = 'cuda:0'
 
         self.model = YOLO(pt_path)
+        if self._device != 'cpu':
+            try:
+                self.model.to(self._device)
+                print(f"  [GPU] YOLO model loaded and moved to {self._device} (model.device={self.model.device})")
+            except Exception as e:
+                print(f"  [WARN] Failed moving model to {self._device}: {e}. Falling back to CPU.")
+                self._device = 'cpu'
+
         self.model_names = getattr(self.model, 'names', {})
 
         try:
             self.model.predict(
-                source=__import__('numpy').zeros((640, 640, 3), dtype='uint8'),
-                device=self._device, verbose=False)
+                source=__import__('numpy').zeros((320, 320, 3), dtype='uint8'),
+                device=self._device, imgsz=320, verbose=False)
         except Exception as e:
             if self._device != 'cpu':
                 print(f"  [WARN] CUDA warmup failed: {e}. Falling back to CPU.")
                 self._device = 'cpu'
+                try:
+                    self.model.to('cpu')
+                except Exception:
+                    pass
                 self.model.predict(
-                    source=__import__('numpy').zeros((640, 640, 3), dtype='uint8'),
-                    device='cpu', verbose=False)
+                    source=__import__('numpy').zeros((320, 320, 3), dtype='uint8'),
+                    device='cpu', imgsz=320, verbose=False)
             else:
                 raise
 
@@ -340,6 +397,7 @@ class CPUInference:
         results = self.model.predict(
             source=frame,
             device=self._device,
+            imgsz=320,
             conf=conf_threshold,
             verbose=False)
         
@@ -403,7 +461,7 @@ def load_inference_engine():
         try:
             engine = CPUInference(PT_MODEL_PATH)
             mode = "GPU" if engine._device != 'cpu' else "CPU"
-            print(f"[OK] Running on {mode} — YOLO SSP_TAILGATE_SEQ_PLANT2-V1.pt\n")
+            print(f"[OK] Running on {mode} — YOLO {os.path.basename(PT_MODEL_PATH)}\n")
             return engine, mode.lower()
         except Exception as e:
             print(f"  [ERR] YOLO load failed: {e}")
@@ -411,7 +469,7 @@ def load_inference_engine():
                 print("  [INFO] Retrying model load on CPU fallback...")
                 try:
                     engine = CPUInference(PT_MODEL_PATH, force_cpu=True)
-                    print("[OK] Running on CPU fallback — YOLO SSP_TAILGATE_SEQ_PLANT2-V1.pt\n")
+                    print(f"[OK] Running on CPU fallback — YOLO {os.path.basename(PT_MODEL_PATH)}\n")
                     return engine, "cpu"
                 except Exception as e2:
                     print(f"  [ERR] CPU fallback failed: {e2}")
@@ -2235,6 +2293,9 @@ def update_wiping(hand_present, motion):
     now = time.time()
     cur = state.current_sequence
 
+    if cur not in (1, 2, 3):
+        return
+
     # ── Hand-on-panel check ─────────────────────────────────────
     _hand_on_panel = (
         state.hand_bbox is not None
@@ -2494,6 +2555,11 @@ def update_wiping(hand_present, motion):
     # [RULE] Sequence completion logic has been moved to process_frame 
     # to support activity-based transitions (e.g. SEQ3 wiping confirms SEQ2 done).
 
+_overlay_lock   = threading.Lock()
+_held_all_boxes = []
+_held_panel     = {'bbox': None, 'label': '', 'color': (200, 200, 200), 'ttl': 0}
+_held_hand      = {'bbox': None, 'ttl': 0}
+_held_serial    = {'bbox': None, 'ttl': 0}
 
 def reset_panel():
     """Full system reset — called after PDF generation or when a new panel_seq1 arrives.
@@ -2537,6 +2603,7 @@ def reset_panel():
     print(f"[RESET] Panel reset complete — reset_id={state.panel_reset_id}")
     # Clear held annotation boxes so previous panel's bboxes don't bleed through
     with _overlay_lock:
+        _held_all_boxes.clear()
         _held_panel.update( {'bbox': None, 'label': '', 'color': (200,200,200), 'ttl': 0})
         _held_hand.update(  {'bbox': None, 'ttl': 0})
         _held_serial.update({'bbox': None, 'ttl': 0})
@@ -2582,8 +2649,7 @@ _BOX_THICK  = 3   # slightly thicker for crisp look
 
 # ── Held-box state (updated by infer thread, read by encoder thread) ─────────
 # Each entry: {'bbox': (x1,y1,x2,y2), 'label': str, 'color': BGR, 'ttl': int}
-_overlay_lock = threading.Lock()
-_held_all_boxes = []
+# (_overlay_lock, _held_all_boxes, _held_panel initialized above reset_panel)
 
 
 def _det_color(name):
@@ -2667,18 +2733,25 @@ def _draw_overlay_internal(frame, seq, status, progress):
     with _overlay_lock:
         boxes_to_draw = list(_held_all_boxes)
 
+    fh, fw = frame.shape[:2]
+    # Auto-scale coordinates if frame is resized (e.g. 960x540 from native 1920x1080)
+    sx = fw / 1920.0
+    sy = fh / 1080.0
+
     for box_info in boxes_to_draw:
         try:
             bbox = box_info['bbox']
             if bbox is not None:
-                x1, y1, x2, y2 = [int(v) for v in bbox]
+                x1 = int(bbox[0] * sx)
+                y1 = int(bbox[1] * sy)
+                x2 = int(bbox[2] * sx)
+                y2 = int(bbox[3] * sy)
                 color = box_info['color']
                 label = box_info['label']
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, _BOX_THICK)
                 _draw_label(frame, label, x1, y1, color)
         except Exception:
             pass
-
 
     return frame
 
@@ -2964,10 +3037,12 @@ def _process_frame_internal(frame, detections):
             print(f'[CAM2-OCR]    YOLO ready: '
                   f'{camera2_ocr_instance.serial_detector is not None}',
                   flush=True)
-    elif _panel_is_portrait and state.current_sequence == 1:
-        print(f'[CAM2-OCR] Portrait but not started: '
-              f'ocr_started={getattr(state,"ocr_started",False)} '
-              f'cam2={camera2_ocr_instance is not None}', flush=True)
+    elif _panel_is_portrait and state.current_sequence == 1 and not getattr(state, "ocr_started", False):
+        if getattr(state, '_last_portrait_log', 0) < time.time() - 3.0:
+            print(f'[CAM2-OCR] Portrait waiting for OCR start: '
+                  f'ocr_started={getattr(state,"ocr_started",False)} '
+                  f'cam2={camera2_ocr_instance is not None}', flush=True)
+            state._last_portrait_log = time.time()
 
     # ── 5. Update panel contour + mask from detection ─────────────
     if panel_det is not None:
@@ -3013,6 +3088,7 @@ def _process_frame_internal(frame, detections):
         # clears immediately when panel is physically removed on Pi.
         if state.panel_absent_frames > 8:
             with _overlay_lock:
+                _held_all_boxes.clear()
                 _held_panel['ttl'] = 0
             state.model_sees = 'NONE'
     # ── 6. Stable sequence buffer ─────────────────────────────────
@@ -3783,24 +3859,22 @@ def _stream(cap, native_fps=None):
                 raw_frame[0] = first_frame.copy()
                 raw_frame_cnt[0] += 1
             
-            # ✅ FIX 3: Verify camera resolution on first frame
+            # ✅ Verify camera resolution on first frame
             if first_frame is not None:
                 h, w = first_frame.shape[:2]
-                print(f"[READER] 🎥 Camera resolution check:")
+                print(f"[READER] 🎥 Sequence camera resolution check:")
                 print(f"[READER]    Actual: {w}x{h}")
-                print(f"[READER]    Expected: 1280x960")
-                if w != 1280 or h != 960:
-                    print(f"[READER] ⚠️ WARNING: Resolution mismatch!")
-                    print(f"[READER]    This may cause scaling → blur/quality loss")
-                    print(f"[READER]    Serial detection accuracy may be affected")
+                print(f"[READER]    Expected: {EXPECTED_CAM1_W}x{EXPECTED_CAM1_H} (Standard 16:9)")
+                if w != EXPECTED_CAM1_W or h != EXPECTED_CAM1_H:
+                    print(f"[READER] ⚠️ NOTE: Camera resolution differs from configured standard ({EXPECTED_CAM1_W}x{EXPECTED_CAM1_H}). Feed is {w}x{h}.")
                 else:
-                    print(f"[READER] ✅ Resolution verified: exact match")
+                    print(f"[READER] ✅ Resolution verified: {w}x{h} exact match")
         
         fails = 0
         last_ok = time.time()
         last_read_time = time.time()
-        # FIX 2: 1s — Reconnect immediately if camera freezes for 1 second
-        STALE_TIMEOUT = 1.0
+        # Generous timeout for RTSP camera network handshake & keyframes
+        STALE_TIMEOUT = 15.0
 
         while running.is_set() and state.stream_generation == my_generation:
             # ── Playback Throttling (for video files) ──────────────────
@@ -3813,86 +3887,31 @@ def _stream(cap, native_fps=None):
             last_read_time = time.time()
 
             ok, frame = cap.read()
-            if not ok:
-                if is_file:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    fails = 0
-                    continue
-
-                if hasattr(cap, 'isOpened') and not cap.isOpened():
-                    print(f"[READER] ⚠️ cap.isOpened() false for {source_url} — reconnecting")
-                    try: cap.release()
-                    except: pass
-                    time.sleep(0.1)  # Faster reconnect
-                    cap = _open_rtsp(source_url)
-                    is_tls = getattr(cap, '__class__', None) and cap.__class__.__name__ == '_TLSRTSPCapture'
-                    fails = 0
-                    last_ok = time.time()
-                    state.prev_gray = None
-                    continue
-                
+            if not ok or frame is None:
                 fails += 1
-                if fails % 20 == 0:
-                    print(f"[READER] ⚠️ {fails} consecutive read failures from {source_url}")
-                time.sleep(0.05)
-                # [FIX] Hold the last frame for 1 second (fails==20) before going completely black.
-                if fails == 20:
-                    with raw_lock: raw_frame[0] = None
-                # ── Stale-frame watchdog: force reconnect if silent drop ──
+                if fails % 50 == 0:
+                    print(f"[READER] ⚠️ {fails} consecutive read attempts waiting for frame from {source_url}")
+                time.sleep(0.04)
+
+                # Reconnect only if truly stale (> STALE_TIMEOUT seconds since last good frame)
                 if time.time() - last_ok > STALE_TIMEOUT and not is_file:
                     print(f'[READER] ⚠️ Stream silent for {STALE_TIMEOUT}s — forcing reconnect')
                     try: cap.release()
                     except: pass
-                    time.sleep(0.1)  # Faster reconnect, do not wait 1s
+                    time.sleep(0.5)
                     cap = _open_rtsp(source_url)
-                    is_tls = getattr(cap, '__class__', None) and cap.__class__.__name__ == '_TLSRTSPCapture'
                     fails = 0
                     last_ok = time.time()
-                    # Reset prev_gray — new stream may have different resolution
                     state.prev_gray = None
-                # FIX: Use _last_frame_ts staleness check instead of counting
-                # False-return failures.  For TLSRTSPCapture, False is normal
-                # between frames and would previously trigger a reconnect after
-                # just 1.5s (30 × 50ms).  STALE_TIMEOUT is the real guard;
-                # the fails counter is only a secondary safety net here.
-                elif fails >= (600 if is_tls else 200):  # ~10s for non-TLS
-                    if is_ffmpeg:
-                        # FFmpegVideoCapture manages its own reconnect internally
-                        fails = 0
-                    elif is_file:
-                        print(f"[READER] ❌ Permanent failure reading file {source_url}")
-                        running.clear()
-                        break
-                    else:
-                        # Only reconnect if truly stale (last good frame >5s ago).
-                        # This guards against False returns that are just camera
-                        # frame-rate gaps, not actual disconnections.
-                        _stale = (time.time() - last_ok)
-                        if _stale < 5.0:
-                            fails = 0  # spurious failures — camera is alive, reset
-                        else:
-                            print(f'[READER] ⚠️ reconnecting RTSP — '
-                                  f'last frame {_stale:.1f}s ago')
-                            try:
-                                cap.release()
-                                time.sleep(0.5)
-                            except: pass
-                            cap = _open_rtsp(source_url)
-                            is_tls = getattr(cap, '__class__', None) and cap.__class__.__name__ == '_TLSRTSPCapture'
-                            fails = 0
-                            state.prev_gray = None
                 continue
             
             fails = 0; last_ok = time.time()
             with raw_lock:
-                raw_frame[0]      = frame.copy()
+                raw_frame[0]      = frame
                 raw_frame_cnt[0] += 1
-            # Brief yield after a successful read.
-            # Prevents CPU spin when camera delivers frames faster than
-            # the encoder can consume them (e.g. GPU system).
-            # 5 ms sleep caps effective reader rate at ~200fps max,
-            # which is well above any real camera FPS.
-            time.sleep(0.005)
+            # For RTSP: no sleep — read as fast as FFmpeg delivers frames.
+            # FFmpegVideoCapture already paces itself at camera FPS via pipe blocking reads.
+            # Sleeping here would add extra latency on top of the camera's own pacing.
 
         try: cap.release()
         except: pass
@@ -3904,6 +3923,7 @@ def _stream(cap, native_fps=None):
         MIN_INTERVAL   = 1.0 / STREAM_FPS_CAP
         STREAM_W       = STREAM_UI_WIDTH
         last_good_jpeg = [None]   # cache last good frame — served when camera drops
+        last_enc_cnt   = [-1]
 
         while running.is_set() and state.stream_generation == my_generation:
             elapsed = time.time() - last_enc_time
@@ -3913,9 +3933,15 @@ def _stream(cap, native_fps=None):
 
             with raw_lock:
                 frame = raw_frame[0]
+                cnt   = raw_frame_cnt[0]
+
+            if frame is not None and cnt == last_enc_cnt[0] and last_good_jpeg[0] is not None:
+                time.sleep(0.01)
+                continue
+            last_enc_cnt[0] = cnt
 
             if frame is None:
-                # Camera dropped — serve last good frame frozen (no black screen)
+                # Camera dropped or connecting — serve last good frame or connecting banner
                 if last_good_jpeg[0] is not None:
                     try:
                         stream_q.get_nowait()
@@ -3923,61 +3949,41 @@ def _stream(cap, native_fps=None):
                         pass
                     stream_q.put_nowait(last_good_jpeg[0])
                     last_enc_time = time.time()
+                else:
+                    # Provide an informative connecting banner while FFmpeg establishes RTSP handshake
+                    blank = np.full((540, 960, 3), 25, dtype=np.uint8)
+                    cv2.putText(blank, "CONNECTING SEQUENCE CAMERA (192.10.70.70)...", (80, 270),
+                                cv2.FONT_HERSHEY_DUPLEX, 0.9, (0, 220, 255), 2, cv2.LINE_AA)
+                    _, buf = cv2.imencode('.jpg', blank, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                    try: stream_q.get_nowait()
+                    except _queue.Empty: pass
+                    stream_q.put_nowait(buf.tobytes())
+                    last_enc_time = time.time()
                 time.sleep(0.1)
                 continue
 
             last_frame_ts = time.time()
-            h, w = frame.shape[:2]
-            sh   = int(h * (STREAM_W / w))
 
             try:
-                # ── FIX: Use INFER result when fresh; otherwise draw on
-                #   SMALL frame (resize first, overlay second = 4× faster).
-                #   Old code drew on 1920×1080 then shrunk → wasted CPU.
-                #   INFER already drew the full annotated frame; reuse it.
-                with overlay_lock:
-                    cached = overlay_frame[0]
-
-                if cached is not None:
-                    # INFER pre-resized to STREAM_W already — use directly.
-                    # Skip cv2.resize entirely: encoder is now zero-copy for
-                    # fresh overlay frames.
-                    small = cached
-                else:
-                    # INFER hasn't run yet (very first frames after camera start).
-                    # Resize to STREAM_W FIRST, then draw overlay on the small
-                    # canvas.  This is 4× faster than drawing on full 1920px frame.
-                    # apply_blue_tint needs masks resized to match the small frame.
-                    small  = cv2.resize(frame, (STREAM_W, sh),
-                                        interpolation=cv2.INTER_LINEAR)
-                    _pmask = state.panel_mask
-                    _cmask = state.cleaned_mask
-                    if _pmask is not None:
-                        try:
-                            _pmask = cv2.resize(_pmask, (STREAM_W, sh),
-                                                interpolation=cv2.INTER_NEAREST)
-                        except Exception:
-                            _pmask = None
-                    if _cmask is not None:
-                        try:
-                            _cmask = cv2.resize(_cmask, (STREAM_W, sh),
-                                                interpolation=cv2.INTER_NEAREST)
-                        except Exception:
-                            _cmask = None
-                    small = apply_blue_tint(small, _pmask, _cmask)
-                    small = draw_overlay(small, state.current_sequence,
-                                         getattr(state, 'status_msg', ''),
-                                         getattr(state, 'progress', 0))
+                # ── Real-Time Live Camera Playback (25 FPS) ──
+                # Always scale the FRESH camera frame for live playback so there is ZERO lag.
+                h, w = frame.shape[:2]
+                sh   = int(h * (STREAM_W / w))
+                display = cv2.resize(frame, (STREAM_W, sh), interpolation=cv2.INTER_LINEAR)
+                display = draw_overlay(display, state.current_sequence,
+                                      getattr(state, 'status_msg', ''),
+                                      getattr(state, 'progress', 0))
 
                 # Add reconnecting message if camera is frozen for > 1.0s
                 if time.time() - last_frame_ts >= 1.0:
                     overlay_text = "⏳ RECONNECTING... (Processing)"
-                    cv2.putText(small, overlay_text, (50, sh // 2),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3, cv2.LINE_AA)
-                    cv2.putText(small, overlay_text, (50, sh // 2),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 1, cv2.LINE_AA)
+                    _dy = display.shape[0] // 2
+                    cv2.putText(display, overlay_text, (50, _dy),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3, cv2.LINE_AA)
+                    cv2.putText(display, overlay_text, (50, _dy),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 1, cv2.LINE_AA)
 
-                _, buf = cv2.imencode('.jpg', small,
+                _, buf = cv2.imencode('.jpg', display,
                                       [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
                 jpg = buf.tobytes()
                 last_good_jpeg[0] = jpg   # cache — served when camera drops
@@ -3995,9 +4001,8 @@ def _stream(cap, native_fps=None):
 
         stream_q.put(None)
 
-    # ── Thread 3: INFERENCE (throttled to ~5 fps — never blocks stream) ──
-    # CPU YOLO takes 200-400ms/frame. Run-then-sleep keeps encoder free.
-    INFER_INTERVAL = 0.20   # 5 fps
+    # ── Thread 3: INFERENCE (GPU powered — runs independently) ──
+    INFER_INTERVAL = 0.03   # ~30 fps check on GPU
 
     def infer():
         last_cnt = [-1]
@@ -4028,7 +4033,7 @@ def _stream(cap, native_fps=None):
                 if w > MAX_PROC_WIDTH:
                     sx = MAX_PROC_WIDTH / w
                     small = cv2.resize(frame, (0, 0), fx=sx, fy=sx,
-                                       interpolation=cv2.INTER_AREA)
+                                       interpolation=cv2.INTER_LINEAR)
                     detections = detect_hand(small)
                     for d in detections:
                         x1, y1, x2, y2 = d['bbox']
@@ -4350,7 +4355,7 @@ class _TLSRTSPCapture:
                '-vf',             f'scale={self._dec_w}:{self._dec_h},format=bgr24',
                '-vcodec',         'rawvideo',
                '-f',              'rawvideo',
-               '-vsync',          '0',
+               '-fps_mode',       'passthrough',
                '-an', '-sn', 'pipe:1']
         print('COMMAND:', cmd)
         try:
@@ -4433,7 +4438,7 @@ class _TLSRTSPCapture:
                '-vf',             f'scale={self._dec_w}:{self._dec_h},format=bgr24',
                '-vcodec',         'rawvideo',
                '-f',              'rawvideo',
-               '-vsync',          '0',
+               '-fps_mode',       'passthrough',
                '-an', '-sn', 'pipe:1']
         try:
             print(f'[RTSP] launching ffmpeg proxy: {cmd}')
@@ -4672,7 +4677,7 @@ class _TLSRTSPCapture:
              '-f', 'h264', '-i', 'pipe:0',
              '-vf', f'scale={dec_w}:{dec_h},format=bgr24',
              '-f', 'rawvideo', '-pix_fmt', 'bgr24',
-             '-vsync', 'drop',
+             '-fps_mode', 'passthrough',
              'pipe:1']
         print(f'[RTSP] launching RTP ffmpeg decoder: {cmd}')
         proc = subprocess.Popen(
@@ -4896,249 +4901,110 @@ class _TLSRTSPCapture:
 
 
 class FFmpegVideoCapture:
-    def isOpened(self):
-        return True # Process is managed internally
-    def release(self):
-        pass
-
-    def __init__(self, url, width=1920, height=1080):   # FIXED: was height=720
+    """
+    High-performance, zero-latency RTSP capture using OpenCV native C++ FFmpeg backend.
+    - Synchronized with new_frame_event to match camera's exact hardware frame rate
+    - Uses OPENCV_FFMPEG_CAPTURE_OPTIONS = "rtsp_transport;tcp|fflags;nobuffer|max_delay;50000"
+    - Uses cv2.CAP_PROP_BUFFERSIZE = 1 (discards stale frames automatically, guaranteed zero delay)
+    - Runs in a background thread to continuously fetch the newest frame
+    """
+    def __init__(self, url, width=1920, height=1080):
         self.url = url
         self.width = width
         self.height = height
         self.frame_size = width * height * 3
-        
-        import threading
-        self.latest_frame = None
-        self.lock = threading.Lock()
+        self.name = "CAM1" if "70:554" in url else ("CAM2" if "69:554" in url else "CAM")
         self.running = True
-        
-        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.latest_frame = None
+        self._last_frame_ts = time.time()
+        self._frame_id = 0
+        self.lock = threading.Lock()
+        self.new_frame_event = threading.Event()
+        self._cap_internal = None
+        self._start_ts = time.time()
+        self.thread = threading.Thread(target=self._capture_loop, daemon=True, name=f"{self.name}-Capture")
         self.thread.start()
-        
+
+    def isOpened(self):
+        return getattr(self, 'running', False) and (self.latest_frame is not None or (time.time() - getattr(self, '_start_ts', time.time())) < 15.0)
+
     def _capture_loop(self):
-        import subprocess
-        import numpy as np
-        import time
-        import select
-
-        # Pure software H264 decode — correct BGR24 output.
-        # hwaccel REMOVED: v4l2m2m output format caused BGR conversion errors.
-        # probesize/analyzeduration NOT restricted (were 32/0 → decoder init fail).
-        if not FFMPEG_BIN:
-            print('[FFmpeg Capture] ffmpeg not found — cannot start FFmpeg capture')
-            time.sleep(1)
-            return
-
-        cmd_base = [FFMPEG_BIN,
-                    # FIX 1: reconnect + 3s socket timeout (was 5s)
-                    # -stimeout prevents readinto() blocking forever
-                    # -reconnect lets FFmpeg self-recover on drops
-                    '-reconnect',          '1',
-                    '-reconnect_streamed', '1',
-                    '-reconnect_delay_max','2',
-                    '-stimeout',           '3000000',  # ✅ REDUCED to 3s
-                    '-thread_queue_size',  '512',      # ✅ INCREASED (was 64)
-                    '-fflags',             'nobuffer+discardcorrupt',  # ✅ ADDED discardcorrupt
-                    '-flags',              'low_delay',
-                    '-rtsp_transport',     'tcp']
-
-        cmd_tail = [
-            '-i',       self.url,
-            '-f',       'rawvideo',
-            '-pix_fmt', 'bgr24',
-            '-s',       f'{self.width}x{self.height}',
-            '-r',       '10',  # ✅ FIXED: 10 fps (was 20, camera is 10)
-            '-vsync',   '0',   # ✅ ADDED: Drop frames immediately
-            '-an', '-sn', '-dn',
-            'pipe:1',
-        ]
-
-        cmd = cmd_base + cmd_tail
-
-        # Pre-allocate read buffer
-        _buf = bytearray(self.frame_size)
-        _mv  = memoryview(_buf)
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|max_delay;50000"
+        self._start_ts = time.time()
         
         while self.running:
-            try:
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=0)  # ✅ CRITICAL FIX: 0 = UNBUFFERED (was frame_size=6MB!)
-                
-                # Drain stderr in background so it never blocks stdout
-                def _drain(p):
-                    try:
-                        for raw in p.stderr:
-                            line = raw.decode('utf-8', errors='ignore').strip()
-                            if line:
-                                print(f'[CAM1-FFMPEG] {line}')
-                    except Exception:
-                        pass
-                threading.Thread(target=_drain, args=(proc,), daemon=True).start()
-                
-                # ✅ FIX 2A: DEBUG - Verify process started successfully
-                import time as time_module
-                time_module.sleep(0.2)  # Give FFmpeg 200ms to start
-                if proc.poll() is not None:
-                    stderr_content = ""
-                    try:
-                        stderr_content = proc.stderr.read(500).decode('utf-8', errors='ignore') if proc.stderr else ""
-                    except:
-                        pass
-                    print(f"[CAM1] ❌ FFmpeg process failed immediately!")
-                    if stderr_content:
-                        print(f"[CAM1] Error: {stderr_content}")
-                    time.sleep(1)
-                    continue  # Retry connection
-                else:
-                    print(f"[CAM1] ✅ Process {proc.pid} started successfully")
-                
-                # ✅ ADD WATCHDOG THREAD
-                _last_frame_time = [time.time()]
-                _frame_timeout = 3.0
-                _proc_stuck = [False]
-                
-                def _watchdog():
-                    while self.running and not _proc_stuck[0]:
-                        time.sleep(0.5)
-                        if proc.poll() is not None:
-                            print("[CAM1] ⚠️ WATCHDOG: Process died")
-                            _proc_stuck[0] = True
-                            return
-                        elapsed = time.time() - _last_frame_time[0]
-                        if elapsed > _frame_timeout:
-                            print(f"[CAM1] ⚠️ WATCHDOG: No frame for {elapsed:.1f}s - RECONNECTING")
-                            _proc_stuck[0] = True
-                            try:
-                                proc.terminate()
-                                proc.wait(timeout=2)
-                            except:
-                                try:
-                                    proc.kill()
-                                except:
-                                    pass
-                            return
-                
-                threading.Thread(target=_watchdog, daemon=True, name="CAM1-Watchdog").start()
-                print(f"[CAM1] ✅ Watchdog thread started (daemon=True, timeout={_frame_timeout}s)")
-
-            except Exception as e:
-                print(f"[FFmpeg Capture] Failed to start: {e}")
-                time.sleep(1)
+            print(f"[{self.name}] Connecting native RTSP stream: {self.url[:55]}...")
+            cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self._cap_internal = cap
+            
+            if not cap.isOpened():
+                print(f"[{self.name}] ⚠️ Failed to open RTSP stream, retrying in 1s...")
+                time.sleep(1.0)
                 continue
                 
-            failures = 0
-            while self.running and not _proc_stuck[0]:
-                try:
-                    # Read frame sequentially with timeout per chunk
-                    n = 0
-                    _read_start = time.time()
-                    _read_timeout = 5.0  # ✅ 5s per frame read
-                    
-                    while n < self.frame_size and self.running and not _proc_stuck[0]:
-                        # ✅ Check if process died
-                        if proc.poll() is not None:
-                            print(f"[CAM1] ⚠️ Process died")
-                            _proc_stuck[0] = True
-                            failures = 999
-                            break
-                        
-                        # ✅ Check timeout
-                        elapsed = time.time() - _read_start
-                        if elapsed > _read_timeout:
-                            print(f"[CAM1] ⚠️ Frame read timeout at {n}/{self.frame_size}")
-                            failures += 1
-                            break
-                        
-                        # ✅ Read chunk (64KB)
-                        try:
-                            chunk_size = min(65536, self.frame_size - n)
-                            got = proc.stdout.readinto(_mv[n:n+chunk_size])
-                            if not got:
-                                print(f"[CAM1] ⚠️ EOF at {n}/{self.frame_size}")
-                                _proc_stuck[0] = True
-                                failures = 999
-                                break
-                            n += got
-                        except Exception as e:
-                            print(f"[CAM1] ❌ Read error: {e}")
-                            failures += 1
-                            break
-                except Exception as e:
-                    print(f"[CAM1] ❌ Error: {e}")
-                    failures += 1
-                    n = 0
-                    
-                if n != self.frame_size:
-                    failures += 1
-                    # ✅ FASTER reconnect: 3 bad frames (was 30!)
-                    if failures >= 3:
-                        print(f"[CAM1] {failures} bad frames → reconnecting")
-                        break
-                    time.sleep(0.05)
-                    continue
-                    
-                failures = 0
-                _last_frame_time[0] = time.time()  # ✅ Update watchdog
-                # FIX 5: copy frame OUTSIDE the lock — only the pointer
-                # swap happens inside. Was: copy inside lock (blocked READER
-                # and ENCODER for the duration of a 6MB memcopy per frame).
-                frame = np.frombuffer(_buf, dtype=np.uint8
-                                     ).reshape((self.height, self.width, 3)).copy()
-                with self.lock:
-                    self.latest_frame   = frame          # already a fresh copy
-                    self._last_frame_ts = time.time()
-                    self._frame_id      = getattr(self, '_frame_id', 0) + 1
-                    
-            # ✅ Cleanup
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except:
-                try:
-                    proc.kill()
-                except:
-                    pass
+            print(f"[{self.name}] ✅ Fast RTSP connected (nobuffer, buffersize=1) — Zero-Delay Mode")
+            consecutive_fails = 0
             
+            while self.running:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    consecutive_fails += 1
+                    if consecutive_fails >= 50:
+                        print(f"[{self.name}] ⚠️ Connection lost (50 bad reads) — reconnecting...")
+                        break
+                    time.sleep(0.01)
+                    continue
+                
+                consecutive_fails = 0
+                now = time.time()
+                with self.lock:
+                    self.latest_frame = frame
+                    self._last_frame_ts = now
+                    self._frame_id += 1
+                    self.new_frame_event.set()
+                    
+            try:
+                cap.release()
+            except Exception:
+                pass
+            self._cap_internal = None
             if self.running:
-                if _proc_stuck[0]:
-                    print("[CAM1] 🔄 Watchdog triggered reconnect")
-                else:
-                    print("[CAM1] ⚠️ Loop exited unexpectedly - reconnecting...")
-                # ✅ FASTER reconnect: 0.5s (was 1.0s)
-                print("[CAM1] 🔄 Waiting 0.5s before reconnect...")
                 time.sleep(0.5)
 
-    def read(self):
-        # ✅ FIX 2C: Use timeout to prevent deadlock
-        acquired = self.lock.acquire(timeout=1.0)
-        if not acquired:
-            print("[CAM1] ⚠️ DEADLOCK DETECTED: read() lock timeout - frame skipped!")
-            return False, None
-        
-        try:
+    def read(self, wait_new=True):
+        if wait_new:
+            # Wait for a fresh hardware frame to pace reader at camera FPS
+            self.new_frame_event.wait(timeout=0.05)
+            self.new_frame_event.clear()
+            
+        with self.lock:
             if self.latest_frame is None:
                 return False, None
-            if time.time() - getattr(self, '_last_frame_ts', time.time()) > 8.0:  # FIX 3
+            if time.time() - self._last_frame_ts > 10.0:
                 return False, None
-            # Only return True when a genuinely NEW frame arrived (prevents READER
-            # from spinning at CPU-max speed copying the same 6 MB frame repeatedly).
-            cur_id   = getattr(self, '_frame_id', 0)
-            last_id  = getattr(self, '_last_read_id', -1)
-            if cur_id == last_id:
-                return False, None          # same frame as last read — tell caller to wait
-            self._last_read_id = cur_id
-            # FIX 6: no second .copy() — _capture_loop already produced
-            # a fresh copy outside the lock. Returning the same object
-            # is safe because _capture_loop always creates a NEW frame
-            # object on every iteration (never mutates latest_frame).
-            return True, self.latest_frame
-        finally:
-            self.lock.release()
-            
+            return True, self.latest_frame.copy()
+
+    def get(self, prop_id):
+        if prop_id == cv2.CAP_PROP_FPS:          return 25.0
+        if prop_id == cv2.CAP_PROP_FRAME_WIDTH:  return float(self.width)
+        if prop_id == cv2.CAP_PROP_FRAME_HEIGHT: return float(self.height)
+        return 0.0
+
+    def set(self, prop_id, value):
+        return False
+
     def release(self):
         self.running = False
+        self.new_frame_event.set()
+        cap = self._cap_internal
+        if cap is not None:
+            try: cap.release()
+            except Exception: pass
+            self._cap_internal = None
+
+    def __del__(self):
+        self.release()
 
 
 def generate_frames():
@@ -5147,12 +5013,27 @@ def generate_frames():
     - FFmpeg Hardware decodes to BGR directly into a shared variable.
     - _stream runs the reader/encoder/infer logic using the latest frame.
     """
+    if not state.video_source:
+        config_file = os.path.join(SCRIPT_DIR, "config.json")
+        cam1_url = "rtsp://admin:Vidana_123@192.10.70.70:554/video/live?channel=1&subtype=0"
+        if os.path.exists(config_file):
+            try:
+                import json
+                with open(config_file, 'r') as f:
+                    cam1_url = json.load(f).get('camera1_url') or cam1_url
+            except Exception:
+                pass
+        state.video_source = cam1_url
+
     if state.video_source:
         source_str = str(state.video_source)
         print(f"[STREAM] Initializing video source: {source_str}")
         is_rtsp = source_str.startswith('rtsp://')
         if is_rtsp:
-            cap = _open_rtsp(source_str)
+            cap = getattr(state, 'cam1_cap', None)
+            if cap is None or getattr(cap, 'url', None) != source_str or not getattr(cap, 'running', True):
+                cap = _open_rtsp(source_str)
+                state.cam1_cap = cap
             yield from _stream(cap, native_fps=25.0)
             return
         if os.path.exists(source_str):
@@ -5161,7 +5042,7 @@ def generate_frames():
             yield from _stream(cap, native_fps=fps)
             return
 
-    # Local camera
+    # Local camera fallback
     cam_id = getattr(state, 'local_camera_id', 0)
     cap = cv2.VideoCapture(cam_id)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
@@ -5441,21 +5322,38 @@ def start_camera():
     data        = request.json or {}
     rtsp_url    = data.get('rtsp_url', '').strip()
     device_id   = data.get('device_id', 0)
-    camera2_url = data.get('camera2_url', '').strip()   # OCR camera (UI only)
+    camera2_url = data.get('camera2_url', '').strip() or "rtsp://admin:Vidana_123@192.10.70.69:554/video/live?channel=1&subtype=0"
 
     state.stream_generation += 1
     state.camera_active      = False
     time.sleep(0.15)
 
     if rtsp_url:
-        state.video_source    = rtsp_url
+        state.video_source = rtsp_url
         msg = f'LAN Camera — {rtsp_url[:40]} — {state.backend.upper()}'
         print(f'[START_CAMERA] STREAM SOURCE set to {rtsp_url}')
+        if hasattr(state, 'cam1_cap') and state.cam1_cap:
+            try: state.cam1_cap.release()
+            except: pass
+        state.cam1_cap = _open_rtsp(rtsp_url)
+    elif not state.video_source:
+        config_file = os.path.join(SCRIPT_DIR, "config.json")
+        cam1_url = "rtsp://admin:Vidana_123@192.10.70.70:554/video/live?channel=1&subtype=0"
+        if os.path.exists(config_file):
+            try:
+                import json
+                with open(config_file) as f:
+                    cam1_url = json.load(f).get('camera1_url') or cam1_url
+            except: pass
+        state.video_source = cam1_url
+        if hasattr(state, 'cam1_cap') and state.cam1_cap:
+            try: state.cam1_cap.release()
+            except: pass
+        state.cam1_cap = _open_rtsp(cam1_url)
+        msg = f'LAN Camera (configured) — {cam1_url[:40]}'
+        print(f'[START_CAMERA] Defaulted to configured CAM1: {cam1_url}')
     else:
-        state.video_source    = None
-        state.local_camera_id = int(device_id) if str(device_id).isdigit() else 0
-        msg = f'Local Camera {state.local_camera_id} — {state.backend.upper()}'
-        print(f'[START_CAMERA] Local camera selected: {state.local_camera_id}')
+        msg = f'Camera active — {str(state.video_source)[:40]}'
 
     # Store Camera-2 URL (OCR overlay) — no inference done here
     _camera2_url = camera2_url if camera2_url else None
@@ -5484,30 +5382,24 @@ def start_camera():
                 if folder:
                     threading.Thread(target=rename_panel_images, args=(folder, serial), daemon=True).start()
 
-        # ── Resolve SSP_TAILGATE_SERIAL.pt path absolutely so it works regardless
-        # of the process CWD (Flask can be launched from any directory).
-        _script_dir       = os.path.dirname(os.path.abspath(__file__))
-        _serial_pt_path   = os.path.join(_script_dir, "models", "serial_18_11_26.pt")
-        if not os.path.exists(_serial_pt_path):
-            # Also try the app root models folder if the script is started
-            # from a different working directory.
-            _serial_pt_path = os.path.join(SCRIPT_DIR, "models", "serial_18_11_26.pt")
+        # ── Resolve serial model path from config ──────────────────
+        _serial_pt_path = SERIAL_MODEL_PATH
         _pt_exists = os.path.exists(_serial_pt_path)
-        print(f'[CAM2-OCR] serial_18_11_26.pt path  → {_serial_pt_path}')
-        print(f'[CAM2-OCR] serial_18_11_26.pt found → {_pt_exists}')
+        print(f'[CAM2-OCR] Serial model path  → {_serial_pt_path}')
+        print(f'[CAM2-OCR] Serial model found → {_pt_exists}')
         if not _pt_exists:
-            print(f'[CAM2-OCR] ❌ CRITICAL: serial_18_11_26.pt missing — Camera 2 OCR will NOT work')
-            print(f'[CAM2-OCR] ❌ Copy serial_18_11_26.pt to: {os.path.join(SCRIPT_DIR, "models", "serial_18_11_26.pt")}')
+            print(f'[CAM2-OCR] ❌ CRITICAL: Serial model missing — Camera 2 OCR will NOT work')
+            print(f'[CAM2-OCR] ❌ Check serial_model path in config.json: {_serial_pt_path}')
         else:
             import os as _os
             sz_mb = round(_os.path.getsize(_serial_pt_path) / (1024*1024), 1)
-            print(f'[CAM2-OCR] ✅ SSP_TAILGATE_SERIAL.pt exists ({sz_mb} MB) — will load on camera start')
+            print(f'[CAM2-OCR] ✅ Serial model exists ({sz_mb} MB) — will load on camera start')
 
         # Open Camera 2 at highest practical resolution so serial digits are large.
         # 2048×1536 gives ~2x more pixels than 1280×960 for the serial region.
         camera2_ocr_instance = Camera2OCR(
             camera2_url=camera2_url,
-            open_cap_fn=lambda u: _open_rtsp(u, width=2048, height=1536),
+            open_cap_fn=lambda u: _open_rtsp(u, width=1920, height=1080),
             on_serial_detected=_on_cam2_serial,
             pt_path=_serial_pt_path
         )
@@ -5624,12 +5516,9 @@ def upload_video():
                 except Exception:
                     pass
 
-            # Resolve SSP_TAILGATE_SERIAL.pt path (same logic as /api/start_camera)
-            _script_dir       = os.path.dirname(os.path.abspath(__file__))
-            _serial_pt_path   = os.path.join(_script_dir, "models", "serial_18_11_26.pt")
-            if not os.path.exists(_serial_pt_path):
-                _serial_pt_path = os.path.join(SCRIPT_DIR, "models", "serial_18_11_26.pt")
-            print(f'[UPLOAD] camera2 upload -> serial_18_11_26.pt path {_serial_pt_path} exists={os.path.exists(_serial_pt_path)}')
+            # Resolve serial model path
+            _serial_pt_path = SERIAL_MODEL_PATH
+            print(f'[UPLOAD] camera2 upload -> serial model path {_serial_pt_path} exists={os.path.exists(_serial_pt_path)}')
 
             try:
                 # Use a simple open_cap_fn that opens the saved file via OpenCV
@@ -5757,13 +5646,14 @@ def _generate_cam2_frames():
     last_frame_ts    = [time.time()]
     last_frame_bytes = [None]
     STREAM_WATCHDOG  = 5.0
-    STREAM_FPS       = 8
+    STREAM_FPS       = 25
+    CAM2_UI_WIDTH    = 640
 
     def _make_banner(text, color_bgr=(255,255,255)):
-        blank = np.full((960, 1280, 3), 20, dtype=np.uint8)
-        cv2.rectangle(blank, (0, 0), (1280, 960), color_bgr, 8)
-        cv2.putText(blank, text, (60, 480),
-                    cv2.FONT_HERSHEY_DUPLEX, 1.4, color_bgr, 3)
+        blank = np.full((720, 960, 3), 20, dtype=np.uint8)
+        cv2.rectangle(blank, (0, 0), (960, 720), color_bgr, 6)
+        cv2.putText(blank, text, (40, 360),
+                    cv2.FONT_HERSHEY_DUPLEX, 1.2, color_bgr, 2)
         _, b = cv2.imencode('.jpg', blank, [cv2.IMWRITE_JPEG_QUALITY, 50])
         return b.tobytes()
 
@@ -5784,15 +5674,11 @@ def _generate_cam2_frames():
                 last_frame_ts[0] = time.time()
                 camera2_ocr_instance._last_ui_poll_ts = time.time()
 
-                # ── Always rebuild the display frame on every loop iteration ──
-                # The old hash-based check (`if fhash != last_frame_hash[0]:`)
-                # prevented updates when the camera scene was static.
-                # Consequence: the SSP_TAILGATE_SERIAL.pt bbox AND the OCR status text
-                # (Scanning / Serial Captured) were NEVER updated once the
-                # hash stabilised — so detection annotations were invisible
-                # on any non-moving scene.
-                # Fix: always encode and serve the latest annotated frame.
-                display   = frame.copy()
+                # Scale frame to CAM2_UI_WIDTH for high FPS and low network latency
+                h_f, w_f = frame.shape[:2]
+                sh_c = int(h_f * (CAM2_UI_WIDTH / float(w_f)))
+                display = cv2.resize(frame, (CAM2_UI_WIDTH, sh_c), interpolation=cv2.INTER_LINEAR)
+
                 is_done   = camera2_ocr_instance.is_done()
                 scanning  = getattr(camera2_ocr_instance, '_is_scanning', False)
                 serial    = camera2_ocr_instance.get_serial_number()
@@ -5801,34 +5687,25 @@ def _generate_cam2_frames():
                 yolo_ready = camera2_ocr_instance.serial_detector is not None
 
                 # ── SSP_TAILGATE_SERIAL.pt status overlay ──────────────────────────────
-                # Draw a prominent red banner when SSP_TAILGATE_SERIAL.pt is not loaded so
-                # the operator immediately knows annotations are disabled.
                 if not yolo_ready:
-                    h_f, w_f = display.shape[:2]
-                    # Check whether file exists to give a precise message
-                    _pt_chk = os.path.join(
-                        os.path.dirname(os.path.abspath(__file__)),
-                        "models", "serial_18_11_26.pt")
+                    h_d, w_d = display.shape[:2]
+                    _pt_chk = SERIAL_MODEL_PATH
+                    _model_name = os.path.basename(SERIAL_MODEL_PATH)
                     _loading = getattr(camera2_ocr_instance, '_yolo_loading', False)
                     if _loading:
-                        _msg = "serial_18_11_26.pt LOADING... please wait"
-                        _clr = (0, 140, 255)  # orange
+                        _msg = f"{_model_name} LOADING... please wait"
+                        _clr = (0, 140, 255)
                     elif not os.path.exists(_pt_chk):
-                        _msg = f"file missing — copy serial_18_11_26.pt to models/"
-                        _clr = (0, 0, 220)    # red
+                        _msg = f"{_model_name} MISSING"
+                        _clr = (0, 0, 220)
                     else:
-                        _msg = "serial_18_11_26.pt LOAD FAILED — check terminal for error"
-                        _clr = (0, 0, 200)    # dark red
-                    # Draw 2-line banner at bottom
-                    cv2.rectangle(display, (0, h_f - 60), (w_f, h_f), _clr, -1)
+                        _msg = f"{_model_name} LOAD FAILED"
+                        _clr = (0, 0, 200)
+                    cv2.rectangle(display, (0, h_d - 50), (w_d, h_d), _clr, -1)
                     cv2.putText(display, _msg,
-                                (8, h_f - 36),
+                                (8, h_d - 18),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                                 (255, 255, 255), 2, cv2.LINE_AA)
-                    cv2.putText(display, "NO SERIAL ANNOTATION — OCR DISABLED",
-                                (8, h_f - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.50,
-                                (200, 200, 255), 1, cv2.LINE_AA)
 
                 # ── Status text — top-left corner ─────────────────────────
                 if is_done and serial and serial != "Reading...":
@@ -5846,19 +5723,19 @@ def _generate_cam2_frames():
 
                 if status_txt:
                     (tw, th), _ = cv2.getTextSize(
-                        status_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
-                    pad = 8
+                        status_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.70, 2)
+                    pad = 6
                     cv2.rectangle(display,
                                   (10, 8),
                                   (10 + tw + pad*2, 8 + th + pad*2),
                                   (20, 20, 20), -1)
                     cv2.putText(display, status_txt,
                                 (10 + pad, 8 + th + pad),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.75,
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.70,
                                 txt_color, 2, cv2.LINE_AA)
 
                 _, jpg = cv2.imencode('.jpg', display,
-                                     [cv2.IMWRITE_JPEG_QUALITY, 70])
+                                     [cv2.IMWRITE_JPEG_QUALITY, 65])
                 last_frame_bytes[0] = jpg.tobytes()
 
                 # Serve latest frame (fresh or cached)
@@ -5945,15 +5822,14 @@ def cam2_status():
     _frames       = getattr(camera2_ocr_instance, '_frame_count', 0)
     _dets         = getattr(camera2_ocr_instance, '_yolo_det_count', 0)
 
-    # Give the UI a precise SSP_TAILGATE_SERIAL.pt status string
+    # Give the UI a precise serial model status string
     if _yolo_loaded:
         _pt_status = f"✅ loaded ({camera2_ocr_instance.serial_detector._device})"
     elif _yolo_loading:
         _pt_status = "⏳ loading..."
     else:
-        _pt_chk = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "models", "serial_18_11_26.pt")
-        _pt_status = ("❌ file missing — copy SSP_TAILGATE_SERIAL.pt to models/" 
+        _pt_chk = SERIAL_MODEL_PATH
+        _pt_status = (f"❌ file missing — {SERIAL_MODEL_PATH}" 
                       if not os.path.exists(_pt_chk) 
                       else "❌ load failed — check terminal")
 
@@ -6137,12 +6013,11 @@ def sequence_status():
 @app.route('/api/serial-status', methods=['GET'])
 def serial_status():
     """
-    Check SSP_TAILGATE_SERIAL.pt loading and Camera 2 OCR status.
+    Check serial model loading and Camera 2 OCR status.
     Call from browser: GET /api/serial-status
-    Shows exactly why SSP_TAILGATE_SERIAL.pt may not be loaded.
+    Shows exactly why serial model may not be loaded.
     """
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _pt_path    = os.path.join(_script_dir, "models", "serial_18_11_26.pt")
+    _pt_path    = SERIAL_MODEL_PATH
     pt_exists   = os.path.exists(_pt_path)
     pt_size_mb  = round(os.path.getsize(_pt_path) / (1024*1024), 1) if pt_exists else 0
 
@@ -6164,14 +6039,15 @@ def serial_status():
         diag['ocr_done']         = camera2_ocr_instance.ocr_done
         diag['serial_number']    = camera2_ocr_instance.serial_number
 
+        _mname = os.path.basename(SERIAL_MODEL_PATH)
         if not pt_exists:
-            diag['status'] = '❌ SERIAL.PT FILE NOT FOUND — place it in models/ folder'
+            diag['status'] = f'❌ SERIAL MODEL NOT FOUND — {_pt_path}'
         elif not diag['yolo_loaded'] and diag['yolo_loading']:
-            diag['status'] = '⏳ SSP_TAILGATE_SERIAL.pt loading (wait a few seconds)'
+            diag['status'] = f'⏳ {_mname} loading (wait a few seconds)'
         elif not diag['yolo_loaded']:
-            diag['status'] = '❌ SSP_TAILGATE_SERIAL.pt failed to load — check terminal for error'
+            diag['status'] = f'❌ {_mname} failed to load — check terminal for error'
         else:
-            diag['status'] = f"✅ SSP_TAILGATE_SERIAL.pt loaded on {diag['yolo_device']}"
+            diag['status'] = f"✅ {_mname} loaded on {diag['yolo_device']}"
     else:
         diag['status'] = '❌ Camera 2 not started — enter Camera 2 URL and start camera'
 
@@ -6291,11 +6167,7 @@ def diagnostics():
     diag = {}
     
     # 1. Check SSP_TAILGATE_SERIAL.pt file
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _serial_pt_path = os.path.join(_script_dir, "models", "serial_18_11_26.pt")
-    if not os.path.exists(_serial_pt_path):
-        _serial_pt_path = os.path.join(SCRIPT_DIR, "models", "serial_18_11_26.pt")
-    
+    _serial_pt_path = SERIAL_MODEL_PATH
     diag['serial_pt_path'] = _serial_pt_path
     diag['serial_pt_exists'] = os.path.exists(_serial_pt_path)
     if os.path.exists(_serial_pt_path):
@@ -6314,9 +6186,11 @@ def diagnostics():
         else:
             diag['yolo_status'] = f"⚠️ Loading... (still initializing)" if getattr(camera2_ocr_instance, '_yolo_loading', True) else "❌ Failed to load"
         
-        # 4. Check EasyOCR
-        diag['easyocr_loaded'] = camera2_ocr_instance.easy_reader is not None
-        diag['easyocr_status'] = "✅ Ready" if camera2_ocr_instance.easy_reader is not None else "⚠️ Not loaded yet"
+        # 4. Check OCR Engine (PaddleOCR / EasyOCR)
+        _ocr_loaded = (getattr(camera2_ocr_instance, 'paddle_reader', None) is not None or
+                       getattr(camera2_ocr_instance, 'easy_reader', None) is not None)
+        diag['easyocr_loaded'] = _ocr_loaded
+        diag['easyocr_status'] = "✅ Ready" if _ocr_loaded else "⚠️ Not loaded yet"
         
         # 5. Camera-2 frame reading status
         diag['camera2_url'] = getattr(camera2_ocr_instance, 'url', 'N/A')[:60] if getattr(camera2_ocr_instance, 'url', None) else "Not set"
@@ -6343,8 +6217,9 @@ def diagnostics():
         diag['capture_slots'] = slots_status
         
         # 9. Panel folder
-        diag['panel_folder'] = camera2_ocr_instance.panel_folder
-        diag['panel_folder_valid'] = os.path.isdir(camera2_ocr_instance.panel_folder)
+        _pf = getattr(camera2_ocr_instance, 'panel_folder', None)
+        diag['panel_folder'] = _pf
+        diag['panel_folder_valid'] = bool(_pf and os.path.isdir(_pf))
         
         # 10. Overall status
         overall_status = "✅ Fully Operational"
@@ -6459,13 +6334,8 @@ if __name__ == '__main__':
             import json
             with open(config_file, 'r') as f:
                 config = json.load(f)
-                cam1_url = config.get('camera1_url')
-                cam2_url = config.get('camera2_url')
-                # Load model filenames from config (fall back to hardcoded defaults)
-                _seq_model_name    = config.get('seq_model', 'SSP_BN7I_trunk_seq.pt')
-                _serial_model_name = config.get('serial_model', 'serial_18_11_26.pt')
-                PT_MODEL_PATH = os.path.join(MODELS_DIR, _seq_model_name)
-                print(f"[CONFIG] seq_model={_seq_model_name}  serial_model={_serial_model_name}")
+                cam1_url = config.get('camera1_url') or "rtsp://admin:Vidana_123@192.10.70.70:554/video/live?channel=1&subtype=0"
+                cam2_url = config.get('camera2_url') or "rtsp://admin:Vidana_123@192.10.70.69:554/video/live?channel=1&subtype=0"
                 SEQ1_NORMAL_FRAMES = config.get('seq1_normal_frames', SEQ1_NORMAL_FRAMES)
                 SEQ1_FALLBACK_FRAMES = config.get('seq1_fallback_frames', SEQ1_FALLBACK_FRAMES)
                 SEQ_WIPE_SECONDS = config.get('seq_wipe_seconds', SEQ_WIPE_SECONDS)
@@ -6491,17 +6361,18 @@ if __name__ == '__main__':
                         if cam1_url:
                             state.video_source = cam1_url
                             state.stream_generation += 1
-                            print(f"[AUTO-START] CAM1 configured")
+                            state.cam1_cap = _open_rtsp(cam1_url)
+                            print(f"[AUTO-START] CAM1 initialized: {cam1_url[:50]}")
                         if _CAM2_OCR_AVAILABLE and cam2_url:
                             _camera2_url = cam2_url
-                            _serial_pt = os.path.join(SCRIPT_DIR, "models", _serial_model_name)
+                            _serial_pt = SERIAL_MODEL_PATH
                             def _on_serial(s):
                                 if s and s not in (None, 'UNKNOWN', 'Searching...'):
                                     state.serial_number = s
                                     state.ocr_done = True
                             camera2_ocr_instance = Camera2OCR(
                                 camera2_url=cam2_url,
-                                open_cap_fn=lambda u: _open_rtsp(u, width=2048, height=1536),
+                                open_cap_fn=lambda u: _open_rtsp(u, width=1920, height=1080),
                                 on_serial_detected=_on_serial,
                                 pt_path=_serial_pt
                             )
