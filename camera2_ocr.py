@@ -1860,6 +1860,7 @@ class Camera2OCR:
                         with self._candidate_lock:
                             self._candidate_crops.append({
                                 'crop':       exact_crop,
+                                'full_frame': frame.copy(),
                                 'sharp':      _c_sharp,
                                 'x1': ex1, 'y1': ey1, 'x2': ex2, 'y2': ey2,
                                 'session_id': self._panel_session_id,
@@ -2186,7 +2187,7 @@ class Camera2OCR:
                             best_2 = batch[1]   # 2nd sharpest exact crop
                             cand_3 = batch[2]   # 3rd candidate
 
-                            # 2. Save ONLY the 2 best exact crops into serial_captures/ (ZERO full frames)
+                            # 2. Save the 2 best exact crops + single full best picture of serial for PDF report
                             if item_folder and item_folder not in ('.', ''):
                                 serial_dir = os.path.join(item_folder, "serial_captures")
                                 try:
@@ -2196,10 +2197,19 @@ class Camera2OCR:
                                     cv2.imwrite(crop1_path, best_1['crop'], [cv2.IMWRITE_JPEG_QUALITY, 95])
                                     cv2.imwrite(crop2_path, best_2['crop'], [cv2.IMWRITE_JPEG_QUALITY, 95])
                                     self.cam2_roi_path = crop1_path
-                                    self.cam2_raw_path = crop1_path
-                                    print(f"[CAM2] 📸 Saved 2 best exact crops to serial_captures/ (Crop 1 sharp={best_1['sharp']:.1f}, Crop 2 sharp={best_2['sharp']:.1f})", flush=True)
+
+                                    # Save single full best picture of serial for the PDF report
+                                    if 'full_frame' in best_1 and best_1['full_frame'] is not None:
+                                        best_full_path = os.path.join(serial_dir, "CAM2_Best_Full.jpg")
+                                        cv2.imwrite(best_full_path, best_1['full_frame'], [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                        self.cam2_raw_path = best_full_path
+                                        print(f"[CAM2] 📸 Saved full best picture of serial: CAM2_Best_Full.jpg", flush=True)
+                                    else:
+                                        self.cam2_raw_path = crop1_path
+
+                                    print(f"[CAM2] 📸 Saved 2 best crops + full best picture to serial_captures/ (Crop 1 sharp={best_1['sharp']:.1f}, Crop 2 sharp={best_2['sharp']:.1f})", flush=True)
                                 except Exception as se:
-                                    print(f"[CAM2] Error saving 2 best crops: {se}", flush=True)
+                                    print(f"[CAM2] Error saving serial captures: {se}", flush=True)
 
                             # 3. OCR Evaluation with 3:2 Voting Ratio
                             print(f"[CAM2-VOTE] 🔍 Evaluating Best Crop 1 (sharp={best_1['sharp']:.1f})...", flush=True)

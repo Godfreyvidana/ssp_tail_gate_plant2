@@ -11,7 +11,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 def generate_pdf_report(serial_number, panel_folder, seq_times=None, total_time=0, panel_start=None, cam2_image=None):
-    """Generates a professional 6-page inspection report for the industrial panel."""
+    """Generates a professional 5-page inspection report for the industrial panel (Cover, SEQ 1, SEQ 2, SEQ 3, Serial Best Picture)."""
     
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     report_name = f"{serial_number}_Inspection_Report.pdf"
@@ -182,54 +182,6 @@ def generate_pdf_report(serial_number, panel_folder, seq_times=None, total_time=
         print("  [PDF] WARNING: SEQ1 full image MISSING")
     story.append(PageBreak())
 
-    # ── PAGE 3: SEQ 1 CROPS (Left, Middle, Right, Bottom) ────
-    story.append(Paragraph("Sequence 1 — Zone Crops", h1_style))
-    story.append(Spacer(1, 10))
-    
-    crop_names = ['Left', 'Middle', 'Right', 'Bottom']
-    crop_images = []
-    
-    for cname in crop_names:
-        # FIX 3: search crops subfolder first, then root folder, then any depth
-        cfiles = _find_best(os.path.join(panel_folder, 'crops'),
-                       f"*_Seq1_{cname}_*.jpg", f"*_Seq1_{cname.lower()}_*.jpg",
-                       f"SSP-SEQ_Seq1_{cname}_*.jpg")
-        if not cfiles:
-            cfiles = _find_best(panel_folder,
-                           f"*_Seq1_{cname}_*.jpg", f"*_Seq1_{cname.lower()}_*.jpg")
-        if cfiles:
-            crop_images.append((cname, cfiles[0]))
-        else:
-            print(f"  [PDF] WARNING: SEQ1 {cname} crop MISSING")
-
-    if crop_images:
-        half_w = (USABLE_W / 2) - 10
-        grid = []
-        for i in range(0, len(crop_images), 2):
-            row_labels = []
-            row_imgs = []
-            
-            # First item in row
-            cname1, cfile1 = crop_images[i]
-            row_labels.append(Paragraph(f"<b>{cname1.capitalize()} Zone</b>", sub_style))
-            row_imgs.append(_fit_image(cfile1, half_w, 2.5*inch))
-            
-            # Second item in row (if exists)
-            if i + 1 < len(crop_images):
-                cname2, cfile2 = crop_images[i+1]
-                row_labels.append(Paragraph(f"<b>{cname2.capitalize()} Zone</b>", sub_style))
-                row_imgs.append(_fit_image(cfile2, half_w, 2.5*inch))
-            else:
-                row_labels.append(Spacer(1, 1))
-                row_imgs.append(Spacer(1, 1))
-                
-            grid.append(row_labels)
-            grid.append(row_imgs)
-            grid.append([Spacer(1, 10), Spacer(1, 10)])
-            
-        story.append(Table(grid, colWidths=[half_w+5, half_w+5]))
-        
-    story.append(PageBreak())
 
     # ── PAGE 4: SEQ 2 FULL ───────────────────────────────────
     story.append(Paragraph("Sequence 2 — Full Panel Image", h1_style))
@@ -253,150 +205,37 @@ def generate_pdf_report(serial_number, panel_folder, seq_times=None, total_time=
         print("  [PDF] WARNING: SEQ3 full image MISSING")
     story.append(PageBreak())
 
-    # ── PAGE 6: SERIAL NUMBER CAPTURE ────────────────────────
-    story.append(Paragraph("6. Serial Number — Camera 2 Capture", h1_style))
+    # ── PAGE 5: SERIAL NUMBER FULL BEST PICTURE ──────────────
+    story.append(Paragraph("Serial Number — Full Best Picture", h1_style))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(
+        f"<b>Confirmed Serial Number:</b>  {serial_number}",
+        ParagraphStyle('SerialLabel', parent=sub_style,
+                       fontSize=14, textColor=colors.HexColor("#1a237e"))))
     story.append(Spacer(1, 15))
 
-    import glob as _gl
-
-    # ── 6a. Serial-captures section (new file structure) ─────────────────────
-    # camera2_ocr_v2.py saves to serial_captures/:
-    #   CAM2_ROI_Annotated_HHMMSS.jpg  — full frame with green detection bbox
-    #   CAM2_Full_Frame_HHMMSS.jpg     — clean full frame (slot 1)
-    #   CAM2_Crop_HHMMSS.jpg           — exact HEF detection region
-    #   CAM2_Crop_2_HHMMSS.jpg         — second crop for voting
-    #   CAM2_Best_Full.jpg             — sharpest full frame across all slots
-    # Main folder also has:
-    #   CAM2_Serial_Appeared_1_*.jpg   — first frame when serial class appeared
-    #   CAM2_Serial_Appeared_Best_*.jpg — sharpest serial-appeared frame
     serial_cap_dir = os.path.join(panel_folder, "serial_captures")
 
-    _best_full   = os.path.join(serial_cap_dir, "CAM2_Best_Full.jpg")
-    _roi_frames  = (
-        sorted(_gl.glob(os.path.join(serial_cap_dir, "CAM2_ROI_Annotated_*.jpg"))) or
-        sorted(_gl.glob(os.path.join(panel_folder, "**", "CAM2_ROI_Annotated_*.jpg")))
-    )
-    _full_frames = (
-        sorted(_gl.glob(os.path.join(serial_cap_dir, "CAM2_Full_Frame_*.jpg"))) or
-        sorted(_gl.glob(os.path.join(panel_folder, "**", "CAM2_Full_Frame_*.jpg")))
-    )
-    _crop_frames = (
-        sorted(_gl.glob(os.path.join(serial_cap_dir, "CAM2_Crop_*.jpg"))) or
-        sorted(_gl.glob(os.path.join(panel_folder, "**", "CAM2_Crop_*.jpg")))
-    )
-    # serial-appeared frames in main folder
-    _appeared_frames = sorted(
-        _gl.glob(os.path.join(panel_folder, "CAM2_Serial_Appeared_*.jpg"))
+    # Search for the single best full picture of serial
+    full_serial_candidates = (
+        _find_best(serial_cap_dir, "CAM2_Best_Full.jpg", "*Best_Full*.jpg", "CAM2_Full_Frame_*.jpg") or
+        _find_best(panel_folder, "CAM2_Best_Full.jpg", "*Serial_Original*.jpg", "*Serial*Best_Full*.jpg", "CAM2_Serial_Appeared_Best*.jpg") or
+        ([cam2_image] if cam2_image and os.path.exists(cam2_image) else []) or
+        _find_best(serial_cap_dir, "CAM2_Crop_1.jpg", "CAM2_Crop_*.jpg")
     )
 
-    # Resolve best full frame: CAM2_Best_Full.jpg first, then slot full, then appeared
-    _best_full_path = (
-        _best_full         if os.path.exists(_best_full) else
-        (_full_frames[0]   if _full_frames else None)   or
-        (_appeared_frames[0] if _appeared_frames else None)
-    )
-
-    print(f"  [PDF] serial_captures/ → roi={len(_roi_frames)}  "
-          f"full={len(_full_frames)}  crop={len(_crop_frames)}  "
-          f"appeared={len(_appeared_frames)}")
-
-    # Backwards-compat: also accept old file names from previous camera2_ocr.py
-    if not _roi_frames and not _full_frames and not _crop_frames:
-        _full_frames = (
-            sorted(_gl.glob(os.path.join(serial_cap_dir, "CAM2_Raw_Frame_*.jpg"))) or
-            sorted(_gl.glob(os.path.join(panel_folder, "**", "CAM2_Raw_Frame_*.jpg")))
-        )
-        _crop_frames = (
-            sorted(_gl.glob(os.path.join(serial_cap_dir, "CAM2_Serial_Crop_*.jpg"))) or
-            sorted(_gl.glob(os.path.join(panel_folder, "**", "CAM2_Serial_Crop_*.jpg")))
-        )
-        _zoom_frames = (
-            sorted(_gl.glob(os.path.join(serial_cap_dir, "CAM2_Serial_Zoom_*.jpg"))) or
-            sorted(_gl.glob(os.path.join(panel_folder, "**", "CAM2_Serial_Zoom_*.jpg")))
-        )
-        if _full_frames: _best_full_path = _full_frames[0]
-
-    if _best_full_path or _roi_frames or _crop_frames:
-        story.append(Paragraph("Serial Number — Camera 2 Detection", h2_style))
-        story.append(Spacer(1, 8))
-
-        # Row 1: Best full frame + Exact Crop
-        half_w = (USABLE_W / 2) - 6
-        row_imgs, row_labels = [], []
-
-        if _best_full_path and os.path.exists(_best_full_path):
-            row_labels.append(Paragraph("<b>Best full frame (sharpest)</b>", sub_style))
-            row_imgs.append(_fit_image(_best_full_path, half_w, 3.5*inch))
-            print(f"  [PDF] Best full → {os.path.basename(_best_full_path)}")
-            if _crop_frames and os.path.exists(_crop_frames[0]):
-                row_labels.append(Paragraph("<b>Crop (exact detection region)</b>", sub_style))
-                row_imgs.append(_fit_image(_crop_frames[0], half_w, 3.5*inch))
-                print(f"  [PDF] Crop → {os.path.basename(_crop_frames[0])}")
-        elif len(_crop_frames) >= 2 and os.path.exists(_crop_frames[0]) and os.path.exists(_crop_frames[1]):
-            row_labels.append(Paragraph("<b>Serial Crop 1 (sharpest)</b>", sub_style))
-            row_imgs.append(_fit_image(_crop_frames[0], half_w, 3.5*inch))
-            row_labels.append(Paragraph("<b>Serial Crop 2</b>", sub_style))
-            row_imgs.append(_fit_image(_crop_frames[1], half_w, 3.5*inch))
-            print(f"  [PDF] Serial crops → {os.path.basename(_crop_frames[0])}, {os.path.basename(_crop_frames[1])}")
-        elif _crop_frames and os.path.exists(_crop_frames[0]):
-            row_labels.append(Paragraph("<b>Crop (exact detection region)</b>", sub_style))
-            row_imgs.append(_fit_image(_crop_frames[0], half_w, 3.5*inch))
-            print(f"  [PDF] Crop → {os.path.basename(_crop_frames[0])}")
-
-        if row_imgs:
-            while len(row_imgs) < 2:
-                row_labels.append(Spacer(1, 1))
-                row_imgs.append(Spacer(1, 1))
-            story.append(Table([row_labels, row_imgs],
-                               colWidths=[half_w + 6, half_w + 6]))
-            story.append(Spacer(1, 14))
-
-        story.append(Paragraph(
-            f"<b>Confirmed Serial Number:</b>  {serial_number}",
-            ParagraphStyle('SerialLabel', parent=sub_style,
-                           fontSize=13, textColor=colors.HexColor("#1a237e"))))
-        story.append(Spacer(1, 20))
-
+    if full_serial_candidates and os.path.exists(full_serial_candidates[0]):
+        best_pic = full_serial_candidates[0]
+        story.append(_fit_image(best_pic, USABLE_W, 6.8*inch))
+        print(f"  [PDF] Serial best picture: {os.path.basename(best_pic)}")
     else:
-        story.append(Paragraph("Serial Number — Camera 2 Capture", h2_style))
-        story.append(Spacer(1, 8))
-        story.append(Paragraph("<i>No serial capture frames found.</i>", sub_style))
-        story.append(Spacer(1, 12))
-
-    # ── 6b. CAM2_Progress milestones — skipped (no longer saved) ────────────
-    # Block removed to fix 'img_path' not defined error
-
-    # ── 6c. Legacy images (if present) ───────────────────────────────────────
-    def _find_serial(folder, sn):
-        def _f(pat):
-            return (_find(folder, f"{sn}_{pat}") or
-                    _find(folder, f"SSP-SEQ_{pat}") or
-                    _find(folder, f"Attempt_{pat}") or
-                    _find(folder, pat))
-        orig  = _f("CLEAN.jpg") or _f("Serial_*_Original_*.jpg") or _f("Serial_Original_*.jpg")
-        rot   = _f("Serial_PDF_180_*.jpg") or _f("Serial_*_R180_*.jpg") or _f("Serial_Rotated180_*.jpg")
-        zooms = _f("Cam2_OCR_Zoomed.jpg") or _f("Serial_*_Zoomed_*.jpg") or _find(folder, "*_Cam2_ROI_Zoomed_*.jpg")
-        return orig, rot, zooms
-
-    orig_files, rot_files, zoom_files = _find_serial(panel_folder, serial_number)
-
-    half_w = (USABLE_W / 2) - 10
-    if orig_files or rot_files:
-        tbl_data = [
-            [Paragraph("<b>Original View (0°)</b>", sub_style),
-             Paragraph("<b>OCR View (180°)</b>", sub_style)],
-            [
-                _fit_image(orig_files[0], half_w, 2.5*inch) if orig_files else Paragraph("N/A", sub_style),
-                _fit_image(rot_files[0],  half_w, 2.5*inch) if rot_files  else Paragraph("N/A", sub_style)
-            ]
-        ]
-        story.append(Table(tbl_data, colWidths=[half_w+5, half_w+5]))
-        story.append(Spacer(1, 20))
+        story.append(Paragraph("<i>Serial picture not available.</i>", sub_style))
+        print("  [PDF] WARNING: Serial picture MISSING")
 
     # Final build
     try:
         doc.build(story)
-        page_count = getattr(doc, 'page', 6)
+        page_count = getattr(doc, 'page', 5)
         print(f"✅ PDF successfully generated: {report_path} (Pages: {page_count})")
         gc.collect()  # Free memory
         return (report_path, page_count)
