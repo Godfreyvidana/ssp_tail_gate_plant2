@@ -130,14 +130,57 @@ def _correct_serial(raw: str):
     return None
 
 # â”€â”€ OCR engines â€” EasyOCR only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- OCR engines -- MICROSERVICE MODE -------------------------------------------
+# PaddleOCR now runs in a SEPARATE PROCESS (ocr_service.py, port 5001).
+# camera2_ocr.py sends crops via HTTP POST to that service.
+# This eliminates GIL contention so the live video feed NEVER freezes
+# while OCR is running.
+# -------------------------------------------------------------------------------
 _TESSERACT_OK = False
+_PADDLE_OK    = False   # Disabled: PaddleOCR moved to ocr_service.py (port 5001)
+
+OCR_SERVICE_URL = "http://127.0.0.1:5001"   # microservice base URL
+
 try:
-    from paddleocr import PaddleOCR
-    _PADDLE_OK = True
-    print("[CAM2] PaddleOCR package imported successfully")
-except Exception as e:
-    _PADDLE_OK = False
-    print(f"[CAM2] PaddleOCR import failed: {e}")
+    import requests as _requests_mod
+    _REQUESTS_OK = True
+    print("[CAM2] requests library OK -- OCR microservice mode active (port 5001)")
+except ImportError:
+    _REQUESTS_OK = False
+    print("[CAM2] WARNING: requests not installed -- OCR microservice unavailable")
+
+
+def _call_ocr_service(img_bgr) -> tuple:
+    """POST a BGR numpy crop to ocr_service.py and return (raw_text, score).
+    Returns ('', 0.0) on any network / service error.
+    """
+    if not _REQUESTS_OK:
+        return ('', 0.0)
+    try:
+        ok, buf = cv2.imencode('.jpg', img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        if not ok:
+            return ('', 0.0)
+        resp = _requests_mod.post(
+            OCR_SERVICE_URL + "/ocr",
+            files={"image": ("crop.jpg", buf.tobytes(), "image/jpeg")},
+            timeout=10,          # 10 s max -- PaddleOCR first call can be slow
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return (data.get("raw_text", ""), float(data.get("score", 0.0)))
+        else:
+            print(f"[CAM2] OCR service HTTP {resp.status_code}", flush=True)
+            return ('', 0.0)
+    except _requests_mod.exceptions.ConnectionError:
+        print(
+            "[CAM2] WARNING: OCR service unreachable (port 5001) "
+            "-- is ocr_service.py running?",
+            flush=True,
+        )
+        return ('', 0.0)
+    except Exception as e:
+        print(f"[CAM2] WARNING: OCR service call failed: {e}", flush=True)
+        return ('', 0.0)
 
 # â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• 
 #  SHARPNESS SCORING
@@ -703,7 +746,7 @@ class Camera2OCR:
         # would block the main loop and the Camera-2 stream start.
         # Background threads let Camera 2 stream start immediately.
         self.serial_detector  = None   # set by _init_yolo thread when ready
-        self.paddle_reader      = None   # set by _init_easy thread when ready
+        self.paddle_reader      = None   # [MICROSERVICE] unused -- OCR via port 5001
         self._yolo_loading     = True   # keep variable name for UI compat
 
         _pt_path_ref = pt_path
@@ -736,61 +779,14 @@ class Camera2OCR:
                 print('[CAM2] â OCR disabled â check ultralytics is installed: pip install ultralytics', flush=True)
             self._yolo_loading = False
 
-        # PaddleOCR init flags
-        self._paddle_init_done   = False
+        # [MICROSERVICE] PaddleOCR moved to ocr_service.py (port 5001)
+        # _paddle_init_done / _init_paddle removed -- not needed.
+        self._paddle_init_done   = True    # always True -- service handles init
         self._paddle_init_failed = False
-
-        def _init_paddle():
-            import traceback
-            print("[CAM2] Initializing PaddleOCR...", flush=True)
-            print(f"[CAM2] INIT INSTANCE id(self)={id(self)}", flush=True)
-            # ── TASK: Explicitly enforce CPU for OCR as configured ─────────
-            _device_type = "cpu"
-            print("[OCR] Using CPU (PaddleOCR enforced for CPU)", flush=True)
-            try:
-                from paddleocr import PaddleOCR
-                self.paddle_reader = PaddleOCR(
-                    use_textline_orientation=True,
-                    lang='en',
-                    enable_mkldnn=False,
-                    ocr_version="PP-OCRv4",
-                    device=_device_type
-                )
-                print(f"[CAM2] ✅ PaddleOCR reader created (device={_device_type})", flush=True)
-                print(f"[CAM2] Reader object={self.paddle_reader}", flush=True)
-                print(f"[CAM2] Reader id={id(self.paddle_reader)}", flush=True)
-                self._paddle_init_done = True
-                self._ocr_event.set()   # wake worker
-            except Exception as e:
-                print(f"[CAM2] ❌ PaddleOCR init failed (device={_device_type}): {e}",
-                      flush=True)
-                import traceback
-                traceback.print_exc()
-                # If GPU init failed, attempt CPU fallback
-                if _device_type == "gpu":
-                    print("[OCR] GPU init failed — retrying with CPU", flush=True)
-                    try:
-                        self.paddle_reader = PaddleOCR(
-                            use_textline_orientation=True,
-                            lang='en',
-                            enable_mkldnn=False,
-                            ocr_version="PP-OCRv4",
-                            device="cpu"
-                        )
-                        print("[OCR] Using CPU (fallback after GPU failure)", flush=True)
-                        self._paddle_init_done = True
-                        self._ocr_event.set()
-                        return
-                    except Exception as e2:
-                        print(f"[CAM2] ❌ PaddleOCR CPU fallback also failed: {e2}",
-                              flush=True)
-                        traceback.print_exc()
-                self._paddle_init_failed = True
-                self._paddle_init_done = True
 
 
         threading.Thread(target=_init_yolo, daemon=True).start()
-        threading.Thread(target=_init_paddle, daemon=True).start()
+        # [MICROSERVICE] _init_paddle thread removed -- PaddleOCR runs in ocr_service.py
 
         # ââ YOLO thread decoupled from main loop (fixes stream lag) ââ
         self._yolo_active        = False
@@ -1737,70 +1733,11 @@ class Camera2OCR:
         return hit
 
     def _run_paddle_ocr(self, img, sd=None) -> tuple:
-        """Call PaddleOCR.predict(). Log to paddleocr_call_log.txt."""
-        from datetime import datetime as _dtp
-        ts   = _dtp.now().strftime("%H:%M:%S.%f")[:-3]
-        ih, iw = img.shape[:2]
-
-        _lp = os.path.join(sd, "paddleocr_call_log.txt") if sd else None
-
-        def _wlog(lines):
-            if not _lp: return
-            try:
-                with open(_lp, "a", encoding="utf-8") as _f:
-                    _f.write("\n".join(lines) + "\n")
-            except Exception as e:
-                print(f'[CAM2] ERROR: {e}'); import traceback; traceback.print_exc()
-
-        if not _PADDLE_OK or self.paddle_reader is None:
-            reason = ("not installed" if not _PADDLE_OK else "not loaded yet")
-            _wlog([f"[{ts}] {iw}×{ih}  SKIPPED ({reason})"])
-            return ('', 0.0)
-
+        """[MICROSERVICE] Route to OCR service on port 5001.
+        Original PaddleOCR body removed -- zero GIL with main app.
+        """
         img_in = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if img.ndim == 2 else img
-        try:
-            print("[CAM2-OCR] Calling PaddleOCR", flush=True)
-            result = self.paddle_reader.ocr(img_in)
-            print(f"[CAM2-OCR] Raw OCR Result={result}", flush=True)
-            
-            # Save debug image
-            if self.panel_folder and self.panel_folder != ".":
-                try:
-                    cv2.imwrite(
-                        os.path.join(self.panel_folder, "debug_ocr_input.jpg"),
-                        img_in
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            import traceback
-            err_msg = f"[{ts}] {iw}x{ih} EXCEPTION: {e}\n{traceback.format_exc()}"
-            _wlog([err_msg])
-            print(f"[OCR] PaddleOCR exception: {e}", flush=True)
-            with open("ocr_debug.log", "a", encoding="utf-8") as f:
-                f.write(f"[{__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {err_msg}\n")
-            return ('', 0.0)
-
-        log = [f"[{ts}] {iw}×{ih}  results={len(result) if result else 0}"]
-        if not result:
-            log.append("  (empty)"); _wlog(log); return ('', 0.0)
-
-        lines = result[0] if isinstance(result, list) and len(result) > 0 and result[0] else []
-        rec_t = [line[1][0] for line in lines if len(line) == 2 and isinstance(line[1], tuple)]
-        rec_s = [line[1][1] for line in lines if len(line) == 2 and isinstance(line[1], tuple)]
-
-        accepted, scores = [], []
-        for idx, (t, s) in enumerate(zip(rec_t, rec_s)):
-            s = float(s)
-            flag = "✓" if s >= 0.3 else "✗"
-            log.append(f"  [{idx}] {repr(str(t)):<22} score={s:.3f} {flag}")
-            if s >= 0.3: accepted.append(str(t).strip()); scores.append(s)
-
-        joined    = ''.join(accepted)
-        max_score = max(scores) if scores else 0.0
-        log.append(f"  → joined={repr(joined)}  max={max_score:.3f}  ({len(accepted)}/{len(rec_t)} accepted)")
-        _wlog(log)
-        return (joined, max_score)
+        return _call_ocr_service(img_in)
 
 
     def _extract_serial(self, texts):
@@ -2389,39 +2326,32 @@ class Camera2OCR:
         while self.running:
             try:
 
-                # ── Wait for PaddleOCR to finish loading ─────────────────────
-                _t0   = _t.time()
-                _last = _t0
-                while self.running:
-                    if self.paddle_reader is not None:
+                # [MICROSERVICE] No PaddleOCR wait needed -- service on port 5001
+                # Verify service is reachable before entering queue loop.
+                _svc_ok = False
+                for _attempt in range(30):
+                    if not self.running:
                         break
-                    now = _t.time()
-                    if now - _last >= 3.0:
-                        print(f"[CAM2-OCR] ⏳ Waiting for PaddleOCR "
-                              f"{now-_t0:.0f}s  "
-                              f"queue={self._ocr_crop_queue.qsize()}",
-                              flush=True)
-                        _last = now
-                    _t.sleep(0.1)
+                    try:
+                        import requests as _rq2
+                        _rr = _rq2.get(OCR_SERVICE_URL + "/health", timeout=2)
+                        if _rr.status_code in (200, 202):
+                            _svc_ok = True
+                            print("[CAM2-OCR] OCR service reachable -- starting",
+                                  flush=True)
+                            break
+                    except Exception:
+                        pass
+                    _t.sleep(1.0)
 
                 if not self.running:
-                    print("[CAM2-OCR] Worker stopped before PaddleOCR ready",
+                    print("[CAM2-OCR] Worker stopped before service ready",
                           flush=True)
-                    break   # exit outer try block — outer while loop exits cleanly
+                    break
 
-                if self.paddle_reader is None:
-                    # This can happen if PaddleOCR init failed completely.
-                    # break back to outer while so it re-waits for paddle_reader.
-                    print("[CAM2-OCR] paddle_reader is None after wait — "
-                          "retrying outer loop in 5s",
+                if not _svc_ok:
+                    print("[CAM2-OCR] WARNING: OCR service not reachable after 30s",
                           flush=True)
-                    _t.sleep(5.0)
-                    break   # re-enter outer while — will re-wait for paddle_reader
-
-                print(f"[CAM2-OCR] ✅ PaddleOCR ready  "
-                      f"reader={type(self.paddle_reader).__name__}  "
-                      f"queue={self._ocr_crop_queue.qsize()} crops waiting",
-                      flush=True)
 
                 _frame = 0
 
@@ -2516,65 +2446,14 @@ class Camera2OCR:
                         else:
                             ocr_input = crop
 
-                        # 6. Call PaddleOCR
-                        if self.paddle_reader is None:
-                            print(
-                                "[CAM2-OCR] ❌ paddle_reader is None",
-                                flush=True
-                            )
-                            self._ocr_crop_queue.task_done()
-                            continue
-
+                        # 6+7. Call OCR microservice (port 5001) -- no GIL
                         print(
-                            f"[CAM2-OCR] Reader OK "
-                            f"id={id(self.paddle_reader)}",
-                            flush=True
-                        )
-
+                            "[CAM2-OCR] -> OCR service",
+                            flush=True)
+                        raw_text, _svc_score = _call_ocr_service(ocr_input)
                         print(
-                            "[CAM2-OCR] 🔍 Calling PaddleOCR",
-                            flush=True
-                        )
-                        print(f"[CAM2-OCR] Input size={ocr_input.shape[1]}x"
-                              f"{ocr_input.shape[0]}", flush=True)
-
-                        try:
-                            result = self.paddle_reader.ocr(ocr_input)
-                        except Exception as e:
-                            import traceback
-                            err_msg = f"[CAM2-OCR] ❌ OCR ERROR: {e}\n{traceback.format_exc()}"
-                            print(err_msg, flush=True)
-                            with open("ocr_debug.log", "a", encoding="utf-8") as f:
-                                f.write(f"[{__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {err_msg}\n")
-                            self._ocr_crop_queue.task_done()
-                            continue
-
-                        print(
-                            "[CAM2-OCR] ✅ PaddleOCR returned",
-                            flush=True
-                        )
-                        print(
-                            f"[CAM2-OCR] Raw OCR Result={result}",
-                            flush=True
-                        )
-
-                        # 7. Extract text
-                        raw_text = ''
-                        if result and isinstance(result, list) and len(result) > 0 and result[0]:
-                            lines = result[0]
-                            texts = []
-                            scores = []
-                            for line in lines:
-                                if len(line) == 2 and isinstance(line[1], tuple):
-                                    texts.append(line[1][0])
-                                    scores.append(line[1][1])
-                            
-                            raw_text = ''.join(
-                                str(t) for t, s in zip(texts, scores)
-                                if float(s) >= 0.25)
-
-                        print(f"[CAM2-OCR] Extracted text = {repr(raw_text)}",
-                              flush=True)
+                            "[CAM2-OCR] service returned: " + repr(raw_text),
+                            flush=True)
 
                         # 8. Validate
                         serial = _correct_serial(raw_text) if raw_text else None
