@@ -1562,6 +1562,10 @@ def _finalize_panel():
         print(f"[COUNT] Save error: {_ce}")
     state.current_sequence    = 0
     state.panel_end_time      = time.time()
+    state.banner_type         = "alert-captured"
+    state.banner_text         = "🎉 ALL SEQUENCES COMPLETED & VERIFIED ✓ — PANEL COMPLETE | அனைத்து வரிசைகளும் முடிந்தது"
+    state.landscape_alert     = "captured"
+    state.landscape_alert_ts  = time.time()
 
     # Lock all statuses — also set completed[i]=True so the /api/sequence_status
     # normalization loop doesn't overwrite these back to 'pending' on the next poll.
@@ -2050,7 +2054,17 @@ def capture(seq, frame, metadata=None):
     saved = capture_sequence_images(cap_data, seq, serial)
     if saved:
         state.sequence_captured[seq] = True
-        print(f"[CAPTURE] ✅ SEQ{seq} images saved (serial={serial})")
+        setattr(state, f'seq{seq}_auto_captured', True)
+        now = time.time()
+        if seq == 1: state.seq1_capture_time = now
+        if seq == 2: state.seq2_capture_time = now
+        if seq == 3: state.seq3_capture_time = now
+        state.banner_type = "alert-captured"
+        next_step = f"PHOTO CHECKED ✓ — PROCEED / FLIP TO SEQ {seq + 1}" if seq < 3 else "ALL PHOTOS COMPLETE"
+        state.banner_text = f"✅ SEQUENCE {seq} PHOTO STORED & CHECKED ✓ — {next_step} | படம் சரிபார்க்கப்பட்டது"
+        state.landscape_alert = "captured"
+        state.landscape_alert_ts = now
+        print(f"[CAPTURE] ✅ SEQ{seq} images saved (serial={serial}) — Green banner activated: {state.banner_text}")
     else:
         print(f"[CAPTURE] ⚠️ SEQ{seq} capture_sequence_images returned nothing")
     return saved
@@ -2220,6 +2234,10 @@ def update_seq(new_seq):
 
         state.current_sequence = new_seq
         state.sequence_status[new_seq] = "active"
+        state.banner_type = ""
+        state.banner_text = ""
+        state.landscape_alert = ""
+        state.seq_hand_free_since[new_seq] = None
 
         # ── Landscape voice + screen alert for SEQ2 and SEQ3 ────────
         # NOTE: For SEQ2, do NOT set landscape_alert here — the operator has
@@ -2369,7 +2387,7 @@ def update_wiping(hand_present, motion):
     )
 
     # ── ALL ZONES: hand-free delay before capture ────────────────────
-    is_captured = getattr(state, f'seq{cur}_auto_captured', False)
+    is_captured = getattr(state, f'seq{cur}_auto_captured', False) or state.sequence_captured.get(cur, False)
     cur_delay = get_capture_delay(cur)
     
     if not is_captured:
@@ -2389,8 +2407,23 @@ def update_wiping(hand_present, motion):
                 state.banner_text = f"✋ REMOVE YOUR HAND — CAPTURING SEQ {cur} IN {remaining:.1f}s | தயவுசெய்து கையை எடுக்கவும்"
             else:
                 state.status_msg = f'SEQ{cur} — Capturing photo...'
-                state.banner_type = "alert-red"
-                state.banner_text = f"📸 CAPTURING SEQ {cur} PHOTO... | படம் எடுக்கப்படுகிறது..."
+                # Timer reached 0 — capture and store photo immediately!
+                if cur == 1 and not state.seq1_auto_captured:
+                    state.seq1_snapshot_data = {'frame': frame.copy(), 'rect': getattr(state, 'panel_rect', None)}
+                    ok = capture(1, frame, metadata=state.seq1_snapshot_data)
+                    if ok:
+                        setattr(state, 'seq1_auto_captured', True)
+                        state.sequence_captured[1] = True
+                        state.seq1_capture_time = now
+                        print(f"[SEQ1-DELAY] ✅ Delay finished — captured & stored sequence_1.jpg!")
+                elif cur in (2, 3) and not getattr(state, f'seq{cur}_auto_captured', False):
+                    ok = capture(cur, frame)
+                    if ok:
+                        setattr(state, f'seq{cur}_auto_captured', True)
+                        state.sequence_captured[cur] = True
+                        if cur == 2: state.seq2_capture_time = now
+                        if cur == 3: state.seq3_capture_time = now
+                        print(f"[SEQ{cur}-DELAY] ✅ Delay finished — captured & stored sequence_{cur}.jpg!")
         else:
             # Hand is present or panel is tilted — reset the delay timer
             if state.seq_hand_free_since[cur] is not None:
@@ -2404,6 +2437,16 @@ def update_wiping(hand_present, motion):
             else:
                 state.status_msg = f'SEQ{cur} — Remove hand for capture'
                 state.banner_text = f"✋ PLEASE REMOVE YOUR HAND FOR SEQ {cur} CAPTURE | கையை எடுக்கவும்"
+    else:
+        # Photo has been stored — show GREEN banner!
+        cap_ts = getattr(state, f'seq{cur}_capture_time', 0) or getattr(state, 'landscape_alert_ts', 0)
+        state.banner_type = "alert-captured"
+        if (now - cap_ts) < 4.0:
+            next_step = f"PHOTO CHECKED ✓ — PROCEED / FLIP TO SEQ {cur + 1}" if cur < 3 else "ALL PHOTOS COMPLETE"
+            state.banner_text = f"✅ SEQUENCE {cur} PHOTO STORED & CHECKED ✓ — {next_step} | படம் சரிபார்க்கப்பட்டது"
+        elif not state.completed.get(cur, False):
+            next_step_wipe = f"CHECK SEQ {cur + 1}" if cur < 3 else "FINISH"
+            state.banner_text = f"✅ SEQ {cur} PHOTO STORED & CHECKED ✓ — WIPING ({int(state.progress)}%) — {next_step_wipe} | படம் சரிபார்க்கப்பட்டது"
 
     # ── SEQ2/SEQ3: progress bar driven by post-capture wipe time ─
     if cur in (2, 3):
@@ -3181,7 +3224,7 @@ def _process_frame_internal(frame, detections):
         if ok:
             print("[CAPTURE] SEQ1 ✅ — full frame saved as sequence_1.jpg")
             state.banner_type = "alert-captured"
-            state.banner_text = "✅ SEQUENCE 1 CAPTURED — START WIPING | படம் எடுக்கப்பட்டது — துடைக்கவும்"
+            state.banner_text = "✅ SEQUENCE 1 PHOTO STORED & CHECKED ✓ — START WIPING / PROCEED TO SEQ 2 | படம் சரிபார்க்கப்பட்டது"
             state.landscape_alert = "captured"
             state.landscape_alert_ts = time.time()
         else:
@@ -3309,7 +3352,7 @@ def _process_frame_internal(frame, detections):
                                     state.seq2_capture_time = now
                                     state.seq_capture_data[2] = _best
                                     state.banner_type = "alert-captured"
-                                    state.banner_text = "✅ SEQUENCE 2 CAPTURED — START WIPING | படம் எடுக்கப்பட்டது — துடைக்கவும்"
+                                    state.banner_text = "✅ SEQUENCE 2 PHOTO STORED & CHECKED ✓ — START WIPING / PROCEED TO SEQ 3 | படம் சரிபார்க்கப்பட்டது"
                                     state.landscape_alert = "captured"
                                     state.landscape_alert_ts = now
                                 else:
@@ -3485,7 +3528,7 @@ def _process_frame_internal(frame, detections):
                                 state.seq3_capture_time = time.time()
                                 state.seq_capture_data[3] = _best3
                                 state.banner_type = "alert-captured"
-                                state.banner_text = "✅ SEQUENCE 3 CAPTURED — START WIPING | படம் எடுக்கப்பட்டது — துடைக்கவும்"
+                                state.banner_text = "✅ SEQUENCE 3 PHOTO STORED & CHECKED ✓ — ALL PHOTOS COMPLETE | படம் சரிபார்க்கப்பட்டது"
                                 state.landscape_alert = "captured"
                                 state.landscape_alert_ts = time.time()
                             else:
@@ -6017,13 +6060,9 @@ def sequence_status():
         state.landscape_alert_ts  = time.time()
         # Voice removed per user request — no "captured" announcement
 
-    # Auto-clear "captured" green banner after 2.5 seconds
-    elif ((state.landscape_alert == "captured" or state.banner_type == "alert-captured")
-            and time.time() - state.landscape_alert_ts > 2.5):
+    # Auto-clear legacy "captured" landscape_alert after 2.5 seconds
+    elif state.landscape_alert == "captured" and time.time() - state.landscape_alert_ts > 2.5:
         state.landscape_alert = ""
-        if state.banner_type == "alert-captured":
-            state.banner_type = ""
-            state.banner_text = ""
 
     return jsonify({
         "sequence": state.current_sequence,

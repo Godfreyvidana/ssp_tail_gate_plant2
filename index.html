@@ -2294,14 +2294,18 @@
                     prevAlert = "";
                     return;
                 }
-                if (alert === prevAlert && !bannerText) return;
-                prevAlert = alert;
-                banner.className = "";
-                body.classList.remove("landscape-alert-visible");
-                if (alert && MESSAGES[alert]) {
-                    banner.innerHTML  = MESSAGES[alert];
-                    banner.className  = CLASS_MAP[alert] || "";
-                    body.classList.add("landscape-alert-visible");
+                if (!bannerText) {
+                    if (alert && MESSAGES[alert]) {
+                        banner.innerHTML  = MESSAGES[alert];
+                        banner.className  = CLASS_MAP[alert] || "";
+                        body.classList.add("landscape-alert-visible");
+                        prevAlert = alert;
+                    } else {
+                        banner.className  = "";
+                        banner.innerHTML  = "";
+                        body.classList.remove("landscape-alert-visible");
+                        prevAlert = "";
+                    }
                 }
             }
             const _origFetch = window.fetch;
