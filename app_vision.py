@@ -167,7 +167,7 @@ app.config['MAX_CONTENT_LENGTH'] = None
 # ─────────────────────────────────────────────────────────────
 # CONFIGURATION & PERFORMANCE
 # ─────────────────────────────────────────────────────────────
-MAX_PROC_WIDTH      = 640     # YOLO inference width (GPU)
+MAX_PROC_WIDTH      = 1024    # YOLO inference width matching trained resolution (1024)
 FRAME_SKIP          = 2       # Process every 3rd frame
 JPEG_QUALITY        = 55      # Balanced: low latency + acceptable quality
 OCR_THROTTLE_FRAMES = 20      # OCR every 20 frames only
@@ -362,8 +362,8 @@ class CPUInference:
 
         try:
             self.model.predict(
-                source=__import__('numpy').zeros((320, 320, 3), dtype='uint8'),
-                device=self._device, imgsz=320, verbose=False)
+                source=__import__('numpy').zeros((1024, 1024, 3), dtype='uint8'),
+                device=self._device, imgsz=1024, verbose=False)
         except Exception as e:
             if self._device != 'cpu':
                 print(f"  [WARN] CUDA warmup failed: {e}. Falling back to CPU.")
@@ -373,8 +373,8 @@ class CPUInference:
                 except Exception:
                     pass
                 self.model.predict(
-                    source=__import__('numpy').zeros((320, 320, 3), dtype='uint8'),
-                    device='cpu', imgsz=320, verbose=False)
+                    source=__import__('numpy').zeros((1024, 1024, 3), dtype='uint8'),
+                    device='cpu', imgsz=1024, verbose=False)
             else:
                 raise
 
@@ -397,7 +397,7 @@ class CPUInference:
         results = self.model.predict(
             source=frame,
             device=self._device,
-            imgsz=320,
+            imgsz=1024,
             conf=conf_threshold,
             verbose=False)
         
