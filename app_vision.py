@@ -2831,17 +2831,6 @@ def _draw_overlay_internal(frame, seq, status, progress):
         except Exception:
             pass
 
-    # Top banner bar on video feed (red for remove hand / countdown, green for captured)
-    banner_txt = getattr(state, 'banner_text', '')
-    banner_typ = getattr(state, 'banner_type', '')
-    if banner_txt:
-        disp_txt = banner_txt.split('|')[0].strip()
-        bg_col = (0, 0, 210) if 'red' in banner_typ else (0, 180, 50) if 'captured' in banner_typ else (0, 100, 255)
-        bar_h = max(36, int(fh * 0.07))
-        cv2.rectangle(frame, (0, 0), (fw, bar_h), bg_col, -1)
-        font_s = max(0.5, fw / 1200.0)
-        cv2.putText(frame, disp_txt, (15, int(bar_h * 0.7)), _FONT, font_s, (255, 255, 255), 2, cv2.LINE_AA)
-
     return frame
 
 
