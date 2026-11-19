@@ -6,14 +6,14 @@
     "serial_model": "models/yolov8n/SSP_trunk_BN7I_yolov8n-serial-model.pt",
     "stream_ui_width": 640,
     "expected_sequence_resolution": "1920x1080",
-    "progress_bar_duration_secs": 10.0,
+    "progress_bar_duration_secs": 5.0,
     "seq1_normal_frames": 2,
     "seq1_fallback_frames": 30,
-    "seq2_grace_period": 10.0,
-    "seq3_grace_period": 10.0,
+    "seq2_grace_period": 5.0,
+    "seq3_grace_period": 5.0,
     "seq2_countdown_duration": 5.0,
     "seq3_countdown_duration": 5.0,
-    "seq_wipe_seconds": 10.0,
+    "seq_wipe_seconds": 5.0,
     "seq_hand_gone_secs": 1.0,
     "capture_delay_secs": 2.0
 }

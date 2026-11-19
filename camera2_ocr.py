@@ -151,36 +151,39 @@ except ImportError:
 
 
 def _call_ocr_service(img_bgr) -> tuple:
-    """POST a BGR numpy crop to ocr_service.py and return (raw_text, score).
-    Returns ('', 0.0) on any network / service error.
+    """POST a BGR numpy crop to ocr_service.py and return (raw_text, score, serial).
+    Returns ('', 0.0, None) on any network / service error.
     """
     if not _REQUESTS_OK:
-        return ('', 0.0)
+        return ('', 0.0, None)
     try:
         ok, buf = cv2.imencode('.jpg', img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
         if not ok:
-            return ('', 0.0)
+            return ('', 0.0, None)
         resp = _requests_mod.post(
             OCR_SERVICE_URL + "/ocr",
             files={"image": ("crop.jpg", buf.tobytes(), "image/jpeg")},
-            timeout=10,          # 10 s max -- PaddleOCR first call can be slow
+            timeout=10,
         )
         if resp.status_code == 200:
             data = resp.json()
-            return (data.get("raw_text", ""), float(data.get("score", 0.0)))
+            return (
+                data.get("raw_text", ""),
+                float(data.get("score", 0.0)),
+                data.get("serial", None),
+            )
         else:
             print(f"[CAM2] OCR service HTTP {resp.status_code}", flush=True)
-            return ('', 0.0)
+            return ('', 0.0, None)
     except _requests_mod.exceptions.ConnectionError:
         print(
-            "[CAM2] WARNING: OCR service unreachable (port 5001) "
-            "-- is ocr_service.py running?",
+            "[CAM2] WARNING: OCR service unreachable (port 5001) -- is ocr_service.py running?",
             flush=True,
         )
-        return ('', 0.0)
+        return ('', 0.0, None)
     except Exception as e:
         print(f"[CAM2] WARNING: OCR service call failed: {e}", flush=True)
-        return ('', 0.0)
+        return ('', 0.0, None)
 
 # â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• 
 #  SHARPNESS SCORING
@@ -1368,6 +1371,36 @@ class Camera2OCR:
     #  SERIAL_CAPTURES SUBFOLDER  (structured 4-file save)
     # âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
+    def _save_crop_to_serial_captures(self, crop, frame, x1, y1, x2, y2, tag="Exact", folder=None):
+        """Save exact detection crop and frames directly to serial_captures/ folder."""
+        eff_folder = folder if (folder and folder != ".") else self.panel_folder
+        if not eff_folder or eff_folder == ".":
+            return
+        serial_dir = os.path.join(eff_folder, "serial_captures")
+        try:
+            os.makedirs(serial_dir, exist_ok=True)
+        except Exception:
+            pass
+
+        ts = datetime.now().strftime("%H%M%S")
+        if crop is not None and crop.size > 0:
+            cv2.imwrite(os.path.join(serial_dir, f"CAM2_Exact_Crop_{ts}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cv2.imwrite(os.path.join(serial_dir, "CAM2_Exact_Crop.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cv2.imwrite(os.path.join(serial_dir, f"CAM2_Padded_Crop_{ts}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+        if frame is not None and frame.size > 0:
+            cv2.imwrite(os.path.join(serial_dir, f"CAM2_Full_Frame_{ts}.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cv2.imwrite(os.path.join(serial_dir, "CAM2_Best_Full.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            annotated = frame.copy()
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(annotated, f"serial {tag}", (x1, max(y1 - 8, 0)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.imwrite(os.path.join(serial_dir, f"CAM2_ROI_Annotated_{ts}.jpg"), annotated, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cv2.imwrite(os.path.join(serial_dir, "CAM2_ROI_Annotated.jpg"), annotated, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            self.cam2_raw_path = os.path.join(serial_dir, f"CAM2_Full_Frame_{ts}.jpg")
+            self.cam2_roi_path = os.path.join(serial_dir, f"CAM2_Exact_Crop_{ts}.jpg")
+            print(f"[CAM2] Saved actual serial crop ({tag}) to {os.path.basename(serial_dir)}", flush=True)
+
     def _save_slot_to_disk(self, idx: int, frame: np.ndarray,
                             crop: np.ndarray, sharp: float):
         """
@@ -2068,6 +2101,12 @@ class Camera2OCR:
                         and crop is not None
                         and not self.ocr_done):
                     
+                                        # Save sharpest resting detection to serial_captures immediately
+                    _c_sharp = sharpness_score(crop)
+                    if _c_sharp > getattr(self, '_best_crop_sharp', 0.0) and getattr(self, 'panel_folder', None) and self.panel_folder != '.':
+                        self._best_crop_sharp = _c_sharp
+                        self._save_crop_to_serial_captures(crop, frame, x1, y1, x2, y2, tag="Best", folder=self.panel_folder)
+
                     if not self._is_scanning:
                         _conf = (self._latest_det[4]
                                  if self._latest_det is not None else 0.0)
@@ -2432,94 +2471,44 @@ class Camera2OCR:
                             self._ocr_crop_queue.task_done()   # TASK 2: always task_done
                             continue
 
-                        # 5. Smart resize for OCR speed and accuracy
+                        # 5. Smart resize -- upscale only if small, never crush text
                         _frame += 1
                         ch, cw = crop.shape[:2]
                         import cv2 as _cv2
-                        if ch < 32:
-                            ocr_input = _cv2.resize(crop, (cw * 2, ch * 2),
-                                                    interpolation=_cv2.INTER_CUBIC)
-                        elif ch > 80:
-                            scale = 64.0 / ch
-                            ocr_input = _cv2.resize(crop, (max(16, int(cw * scale)), 64),
-                                                    interpolation=_cv2.INTER_AREA)
+                        if ch < 40:
+                            ocr_input = _cv2.resize(crop, (cw * 2, ch * 2), interpolation=_cv2.INTER_CUBIC)
                         else:
                             ocr_input = crop
 
-                        # 6+7. Call OCR microservice (port 5001) -- no GIL
-                        print(
-                            "[CAM2-OCR] -> OCR service",
-                            flush=True)
-                        raw_text, _svc_score = _call_ocr_service(ocr_input)
-                        print(
-                            "[CAM2-OCR] service returned: " + repr(raw_text),
-                            flush=True)
+                        # 6+7. Call OCR microservice (port 5001)
+                        print("[CAM2-OCR] -> Calling OCR service on crop", flush=True)
+                        _call_res = _call_ocr_service(ocr_input)
+                        raw_text, _svc_score = _call_res[0], _call_res[1]
+                        svc_serial = _call_res[2] if len(_call_res) > 2 else None
+                        print(f"[CAM2-OCR] service returned: {repr(raw_text)} score={_svc_score:.3f} serial={svc_serial}", flush=True)
 
-                        # 8. Validate
-                        serial = _correct_serial(raw_text) if raw_text else None
+                        # 8. Validate serial
+                        serial = svc_serial or (_correct_serial(raw_text) if raw_text else None)
 
-                        # TASK 6: detailed voting log
                         if raw_text:
                             print(f"[OCR] Candidate    = {repr(raw_text)}", flush=True)
                         if serial:
-                            print(f"[CAM2-OCR] Corrected Serial={serial}", flush=True)
+                            print(f"[CAM2-OCR] Validated Serial={serial}", flush=True)
                         else:
-                            reason = ("empty text" if not raw_text
-                                      else f"validation failed for {repr(raw_text)}")
+                            reason = "empty text" if not raw_text else f"validation failed for {repr(raw_text)}"
                             print(f"[OCR] Rejected Reason = {reason}", flush=True)
 
                         if not serial:
-                            self._ocr_crop_queue.task_done()   # TASK 2: always task_done
+                            self._ocr_crop_queue.task_done()
                             continue
 
-                        # 9. Vote
+                        # 9. Serial found! Save the confirmed crop to serial_captures/
                         self.partial_serial = serial
-                        day    = serial[0:2]
-                        code   = serial[6:9]
-                        letter = serial[9]
-
-                        if self.day_confirmed    is None: self.day_votes[day]    += 1
-                        if self.code_confirmed   is None: self.code_votes[code]  += 1
-                        if self.letter_confirmed is None: self.letter_votes[letter] += 1
-
-                        d  = self.day_votes[day]       if self.day_confirmed    is None else 0
-                        c  = self.code_votes[code]     if self.code_confirmed   is None else 0
-                        lv = self.letter_votes[letter] if self.letter_confirmed is None else 0
-                        CV = 2
-
-                        # TASK 6: Vote Count log
-                        print(f"[OCR] Vote Count   day='{day}'({d}/{CV}) "
-                              f"code='{code}'({c}/{CV}) "
-                              f"letter='{letter}'({lv}/{CV})", flush=True)
-
-                        if d  >= CV and self.day_confirmed    is None:
-                            self.day_confirmed = day
-                            print(f"[CAM2-OCR] ⭐ DAY FROZEN='{day}'", flush=True)
-                        if c  >= CV and self.code_confirmed   is None:
-                            self.code_confirmed = code
-                            print(f"[CAM2-OCR] ⭐ CODE FROZEN='{code}'", flush=True)
-                        if lv >= CV and self.letter_confirmed is None:
-                            self.letter_confirmed = letter
-                            print(f"[CAM2-OCR] ⭐ LETTER FROZEN='{letter}'", flush=True)
-
-                        if (self.day_confirmed    is not None
-                                and self.code_confirmed   is not None
-                                and self.letter_confirmed is not None):
-                            from datetime import datetime as _dtc
-                            _n = _dtc.now()
-                            final = (self.day_confirmed
-                                     + f"{_n.month:02d}{_n.year%100:02d}"
-                                     + self.code_confirmed
-                                     + self.letter_confirmed)
-                            print(f"[CAM2-OCR] SERIAL CONFIRMED={final}",
-                                  flush=True)
-                            # TASK 1: always pass item_folder + item_session —
-                            # NEVER self.panel_folder — to prevent Panel A→B leak.
-                            self._ocr_crop_queue.task_done()   # TASK 2: task_done before confirm
-                            self._confirm_serial(final,
-                                                 panel_folder=item_folder,
-                                                 session_id=item_session)
-                            continue   # task_done already called above
+                        print(f"[CAM2-OCR] SERIAL CONFIRMED={serial}", flush=True)
+                        self._save_crop_to_serial_captures(crop, frame, x1, y1, x2, y2, tag="Confirmed", folder=item_folder)
+                        self._ocr_crop_queue.task_done()
+                        self._confirm_serial(serial, panel_folder=item_folder, session_id=item_session)
+                        continue
 
                         # TASK 2: task_done for every path that reaches here
                         self._ocr_crop_queue.task_done()

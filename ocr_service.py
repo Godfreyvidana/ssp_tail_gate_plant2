@@ -118,6 +118,8 @@ def _apply_corrections(s: str):
 
 def _correct_serial(raw: str):
     """Clean OCR noise then extract valid 9-digit+1-letter serial."""
+    if not raw:
+        return None
     s = raw.strip().strip("'`\"")
     for k, v in _REPL_DIGITS.items():
         s = s.replace(k, v)
@@ -216,16 +218,32 @@ class _OCREngine:
         if not result or not isinstance(result, list) or not result[0]:
             return ('', 0.0)
 
-        texts, scores = [], []
-        for line in result[0]:
-            if len(line) == 2 and isinstance(line[1], tuple):
-                texts.append(str(line[1][0]))
-                scores.append(float(line[1][1]))
+        first = result[0]
 
-        accepted = [t for t, s in zip(texts, scores) if s >= 0.25]
-        raw_text = ''.join(accepted)
-        max_score = max(scores) if scores else 0.0
-        return (raw_text, max_score)
+        # 1. Modern PaddleX format (OCRResult / dict with rec_texts, rec_scores)
+        if hasattr(first, 'get') or isinstance(first, dict):
+            rec_texts = first.get('rec_texts', [])
+            rec_scores = first.get('rec_scores', [])
+            print(f"[OCR-SERVICE] PaddleX format: texts={rec_texts} scores={rec_scores}", flush=True)
+            accepted = [str(t).strip() for t, s in zip(rec_texts, rec_scores) if float(s) >= 0.20]
+            raw_text = ''.join(accepted)
+            max_score = max(rec_scores) if rec_scores else 0.0
+            return (raw_text, float(max_score))
+
+        # 2. Legacy PaddleOCR format (list of [box, (text, score)])
+        if isinstance(first, list):
+            texts, scores = [], []
+            for line in first:
+                if len(line) == 2 and isinstance(line[1], (tuple, list)):
+                    texts.append(str(line[1][0]).strip())
+                    scores.append(float(line[1][1]))
+            print(f"[OCR-SERVICE] Legacy format: texts={texts} scores={scores}", flush=True)
+            accepted = [t for t, s in zip(texts, scores) if s >= 0.20]
+            raw_text = ''.join(accepted)
+            max_score = max(scores) if scores else 0.0
+            return (raw_text, float(max_score))
+
+        return ('', 0.0)
 
 
 _engine = _OCREngine()
@@ -291,16 +309,15 @@ def ocr_endpoint():
     if img_bgr is None or img_bgr.size == 0:
         return jsonify({'error': 'No valid image received'}), 400
 
-    # ── smart resize for best OCR accuracy ────────────────────
+    # ── smart resize: only upscale if too small, never downscale text to illegible ──
     h, w = img_bgr.shape[:2]
-    if h < 32:
-        img_bgr = cv2.resize(img_bgr, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
-        h, w = img_bgr.shape[:2]
-    elif h > 80:
+    if h < 40:
         scale = 64.0 / h
-        img_bgr = cv2.resize(img_bgr,
-                              (max(16, int(w * scale)), 64),
-                              interpolation=cv2.INTER_AREA)
+        img_bgr = cv2.resize(img_bgr, (int(w * scale), 64), interpolation=cv2.INTER_CUBIC)
+        h, w = img_bgr.shape[:2]
+    elif w > 1200:
+        scale = 1000.0 / w
+        img_bgr = cv2.resize(img_bgr, (1000, int(h * scale)), interpolation=cv2.INTER_AREA)
         h, w = img_bgr.shape[:2]
 
     print(f"[OCR-SERVICE] /ocr  image={w}×{h}", flush=True)
