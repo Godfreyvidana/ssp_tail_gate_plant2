@@ -41,13 +41,26 @@ import threading
 import traceback
 from collections import Counter
 from datetime import datetime
+import json
 
-# ── Limit CPU threads so OCR doesn't starve the network/event loop ──
-os.environ.setdefault('OMP_NUM_THREADS',       '2')
-os.environ.setdefault('OPENBLAS_NUM_THREADS',  '2')
-os.environ.setdefault('MKL_NUM_THREADS',       '2')
-os.environ.setdefault('VECLIB_MAXIMUM_THREADS','2')
-os.environ.setdefault('NUMEXPR_NUM_THREADS',   '2')
+# ── Load config.json for OCR parameters & CPU threading ──
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
+CONFIG = {}
+if os.path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            CONFIG = json.load(f)
+    except Exception as e:
+        print(f"[OCR-SERVICE] Warning: Could not load {CONFIG_FILE}: {e}")
+
+# ── CPU thread configuration (Option 3) ──
+_cpu_threads = str(CONFIG.get('ocr_cpu_threads', 4))
+os.environ['OMP_NUM_THREADS']        = _cpu_threads
+os.environ['OPENBLAS_NUM_THREADS']   = _cpu_threads
+os.environ['MKL_NUM_THREADS']        = _cpu_threads
+os.environ['VECLIB_MAXIMUM_THREADS'] = _cpu_threads
+os.environ['NUMEXPR_NUM_THREADS']    = _cpu_threads
 
 import cv2
 import numpy as np
@@ -153,20 +166,28 @@ class _OCREngine:
         threading.Thread(target=self._init, daemon=True).start()
 
     def _init(self):
-        print("[OCR-SERVICE] Initialising PaddleOCR (CPU) …", flush=True)
+        print(f"[OCR-SERVICE] Initialising PaddleOCR (CPU, threads={_cpu_threads}) …", flush=True)
         try:
             from paddleocr import PaddleOCR
+
+            enable_mkldnn            = bool(CONFIG.get("ocr_enable_mkldnn", False))
+            use_doc_orientation      = bool(CONFIG.get("ocr_use_doc_orientation", False))
+            use_doc_unwarping        = bool(CONFIG.get("ocr_use_doc_unwarping", False))
+            use_textline_orientation = bool(CONFIG.get("ocr_use_textline_orientation", False))
+
             reader = PaddleOCR(
-                use_textline_orientation=True,
+                use_doc_orientation_classify=use_doc_orientation,
+                use_doc_unwarping=use_doc_unwarping,
+                use_textline_orientation=use_textline_orientation,
+                enable_mkldnn=enable_mkldnn,
                 lang='en',
-                enable_mkldnn=False,
                 ocr_version='PP-OCRv4',
                 device='cpu',
             )
             with self._lock:
                 self._reader = reader
                 self._ready  = True
-            print("[OCR-SERVICE] ✅ PaddleOCR ready!", flush=True)
+            print(f"[OCR-SERVICE] ✅ PaddleOCR ready! (threads={_cpu_threads}, mkldnn={enable_mkldnn}, doc_ori={use_doc_orientation}, unwarp={use_doc_unwarping}, textline_ori={use_textline_orientation})", flush=True)
         except Exception as e:
             print(f"[OCR-SERVICE] ❌ PaddleOCR init failed: {e}", flush=True)
             traceback.print_exc()

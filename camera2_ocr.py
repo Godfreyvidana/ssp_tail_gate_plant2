@@ -31,13 +31,27 @@ import os
 import sys
 import re
 import shutil
+import json
+import concurrent.futures
 
-# FIX: Limit multi-threading for PaddleOCR and PyTorch so they don't starve the stream CPU
-os.environ['OMP_NUM_THREADS'] = '2'
-os.environ['OPENBLAS_NUM_THREADS'] = '2'
-os.environ['MKL_NUM_THREADS'] = '2'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '2'
-os.environ['NUMEXPR_NUM_THREADS'] = '2'
+def _get_app_config() -> dict:
+    cfg_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    if os.path.isfile(cfg_file):
+        try:
+            with open(cfg_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+# FIX: CPU threads for PaddleOCR and PyTorch from config.json (Option 3)
+_cfg_init = _get_app_config()
+_cpu_threads = str(_cfg_init.get('ocr_cpu_threads', 4))
+os.environ['OMP_NUM_THREADS']        = _cpu_threads
+os.environ['OPENBLAS_NUM_THREADS']   = _cpu_threads
+os.environ['MKL_NUM_THREADS']        = _cpu_threads
+os.environ['VECLIB_MAXIMUM_THREADS'] = _cpu_threads
+os.environ['NUMEXPR_NUM_THREADS']    = _cpu_threads
 
 FFMPEG_BIN = shutil.which('ffmpeg') or (r'C:\ffmpeg\bin\ffmpeg.exe' if os.path.isfile(r'C:\ffmpeg\bin\ffmpeg.exe') else 'ffmpeg')
 
@@ -2211,14 +2225,27 @@ class Camera2OCR:
                                 except Exception as se:
                                     print(f"[CAM2] Error saving serial captures: {se}", flush=True)
 
-                            # 3. OCR Evaluation with 3:2 Voting Ratio
-                            print(f"[CAM2-VOTE] 🔍 Evaluating Best Crop 1 (sharp={best_1['sharp']:.1f})...", flush=True)
-                            raw1, sc1, s1 = _eval_crop_for_ocr(best_1['crop'])
-                            print(f"[CAM2-VOTE] Crop 1 result: raw={repr(raw1)} score={sc1:.2f} -> serial={s1}", flush=True)
+                            # 3. OCR Evaluation with 3:2 Voting Ratio (Option 1 & 3)
+                            cfg = _get_app_config()
+                            parallel_eval = bool(cfg.get("ocr_parallel_evaluation", True))
+                            t_eval_start = time.time()
 
-                            print(f"[CAM2-VOTE] 🔍 Evaluating Best Crop 2 (sharp={best_2['sharp']:.1f})...", flush=True)
-                            raw2, sc2, s2 = _eval_crop_for_ocr(best_2['crop'])
+                            if parallel_eval:
+                                print(f"[CAM2-VOTE] ⚡ Concurrently evaluating Best Crops 1 & 2 via ThreadPool (Option 1)...", flush=True)
+                                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                                    fut1 = executor.submit(_eval_crop_for_ocr, best_1['crop'])
+                                    fut2 = executor.submit(_eval_crop_for_ocr, best_2['crop'])
+                                    raw1, sc1, s1 = fut1.result()
+                                    raw2, sc2, s2 = fut2.result()
+                            else:
+                                print(f"[CAM2-VOTE] 🔍 Evaluating Best Crop 1 sequentially (sharp={best_1['sharp']:.1f})...", flush=True)
+                                raw1, sc1, s1 = _eval_crop_for_ocr(best_1['crop'])
+                                print(f"[CAM2-VOTE] 🔍 Evaluating Best Crop 2 sequentially (sharp={best_2['sharp']:.1f})...", flush=True)
+                                raw2, sc2, s2 = _eval_crop_for_ocr(best_2['crop'])
+
+                            print(f"[CAM2-VOTE] Crop 1 result: raw={repr(raw1)} score={sc1:.2f} -> serial={s1}", flush=True)
                             print(f"[CAM2-VOTE] Crop 2 result: raw={repr(raw2)} score={sc2:.2f} -> serial={s2}", flush=True)
+                            print(f"[CAM2-VOTE] Best 2 crops evaluated in {time.time() - t_eval_start:.2f}s", flush=True)
 
                             confirmed_serial = None
                             consensus_reason = ""

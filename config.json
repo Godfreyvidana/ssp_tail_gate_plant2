@@ -21,5 +21,11 @@
     "seq2_countdown_duration": 5.0,
     "seq3_countdown_duration": 5.0,
     "seq_wipe_seconds": 5.0,
-    "seq_hand_gone_secs": 1.0
+    "seq_hand_gone_secs": 1.0,
+    "ocr_parallel_evaluation": true,
+    "ocr_cpu_threads": 4,
+    "ocr_enable_mkldnn": false,
+    "ocr_use_doc_orientation": false,
+    "ocr_use_doc_unwarping": false,
+    "ocr_use_textline_orientation": false
 }
