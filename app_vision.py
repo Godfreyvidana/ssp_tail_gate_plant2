@@ -1673,7 +1673,12 @@ def _finalize_panel():
                 live = getattr(state, 'cam2_image_path', None)
                 if live and os.path.exists(live):
                     final_cam2_image = live
-            # Folder scan — finds Cam2_ROI, Cam2_FullFrame, Serial_Original, OCR_Frame
+            # Folder scan — finds CAM2_Crop_1 in serial_captures, Cam2_ROI, Cam2_FullFrame, OCR_Frame
+            if not final_cam2_image or not os.path.exists(str(final_cam2_image)):
+                _c1 = os.path.join(pdf_folder, "serial_captures", "CAM2_Crop_1.jpg")
+                if os.path.exists(_c1):
+                    final_cam2_image = _c1
+                    print(f'[PDF] Found serial crop: {os.path.basename(_c1)}')
             if not final_cam2_image or not os.path.exists(str(final_cam2_image)):
                 import glob as _gl
                 for _pat in [
@@ -3789,33 +3794,15 @@ def _process_frame_internal(frame, detections):
 
                 state.folder_renamed = True
 
-                # Save best Camera-2 frame to panel folder as Serial_Original.
-                # Priority: cam2_raw_path (best slot frame already saved to disk)
-                # → annotated frame of that moment as fallback.
+                # Link CAM2_Crop_1.jpg to state.cam2_image_path (zero full frame waste)
                 try:
-                    dest       = state.current_sequence_panel_folder
-                    serial_orig = os.path.join(dest,
-                                               f"{serial}_Serial_Original.jpg")
-                    # Use the best slot frame path if it exists on disk
-                    best_path = getattr(camera2_ocr_instance,
-                                        'cam2_raw_path', None)
-                    if best_path and os.path.exists(best_path):
-                        import shutil
-                        shutil.copy2(best_path, serial_orig)
-                        state.cam2_image_path = serial_orig
-                        print(f"[CAM2] Serial_Original copied from best slot → "
-                              f"{os.path.basename(serial_orig)}")
-                    else:
-                        # Fallback: latest Camera-2 frame
-                        cam2_img = (camera2_ocr_instance.get_annotated_frame()
-                                    if camera2_ocr_instance else None)
-                        if cam2_img is not None:
-                            cv2.imwrite(serial_orig, cam2_img)
-                            state.cam2_image_path = serial_orig
-                            print(f"[CAM2] Serial_Original saved (latest frame) → "
-                                  f"{os.path.basename(serial_orig)}")
+                    dest = state.current_sequence_panel_folder
+                    crop1_path = os.path.join(dest, "serial_captures", "CAM2_Crop_1.jpg")
+                    if os.path.exists(crop1_path):
+                        state.cam2_image_path = crop1_path
+                        print(f"[CAM2] Linked CAM2_Crop_1 to PDF → {os.path.basename(crop1_path)}")
                 except Exception as _ce:
-                    print(f"[CAM2] Serial_Original save error: {_ce}")
+                    print(f"[CAM2] Error linking crop image: {_ce}")
         except Exception as _re:
             print(f"[FOLDER] Rename error: {_re}")
 

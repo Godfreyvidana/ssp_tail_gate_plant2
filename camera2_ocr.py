@@ -723,6 +723,11 @@ class Camera2OCR:
         self._capture_slots       = [None] * self.BEST_FRAME_COUNT
         self._slots_saved         = [False] * self.BEST_FRAME_COUNT
 
+        # ── 3:2 Voting candidate buffer (capture 3, pick best 2) ──
+        self._candidate_crops     = []
+        self._candidate_lock      = threading.Lock()
+        self._last_candidate_ts   = 0.0
+
         # OCR buffer
         self._ocr_buffer_frames   = []
         self._best_frames_saved   = False
@@ -890,6 +895,8 @@ class Camera2OCR:
             self.intervals_saved    = set()
             self._capture_slots     = [None] * self.BEST_FRAME_COUNT
             self._slots_saved       = [False] * self.BEST_FRAME_COUNT
+            self._candidate_crops   = []
+            self._last_candidate_ts = 0.0
             self._ocr_buffer_frames = []
             self._best_frames_saved = False
             # FIX 1a: _ocr_event.clear() removed. Worker is queue-driven;
@@ -943,6 +950,8 @@ class Camera2OCR:
             self.intervals_saved    = set()
             self._capture_slots     = [None] * self.BEST_FRAME_COUNT
             self._slots_saved       = [False] * self.BEST_FRAME_COUNT
+            self._candidate_crops   = []
+            self._last_candidate_ts = 0.0
             self._ocr_buffer_frames = []
             self._best_frames_saved = False
             # FIX 1b: _ocr_event.clear() removed. Worker is queue-driven;
@@ -1009,6 +1018,12 @@ class Camera2OCR:
         self.panel_folder = folder
         if folder and folder != '.':
             self._current_panel_id = folder   # ← CHANGE 3
+
+        if hasattr(self, '_candidate_lock'):
+            with self._candidate_lock:
+                for c in getattr(self, '_candidate_crops', []):
+                    if not c.get('folder') or c['folder'] == '.':
+                        c['folder'] = folder
 
         pending = getattr(self, '_pending_slot_frames', [])
         if not pending:
@@ -1250,290 +1265,22 @@ class Camera2OCR:
     def _try_fill_slot(self, frame:np.ndarray, crop:np.ndarray,
                         x1:int, y1:int, x2:int, y2:int,
                         elapsed:float):
-        """
-        Try to fill the next unfilled capture slot.
-        A slot is fillable if elapsed >= its target time AND
-        the crop passes sharpness threshold.
-        Only called when yolo_detected=True.
-
-        FIX-SEQ1: When panel_folder is not yet set we cache up to 3 frames
-        instead of silently dropping them.  set_panel_folder() will flush
-        the cache immediately when the folder is assigned.
-        """
-        folder = self.panel_folder
-        if not folder or folder == ".":
-            # ââ Cache frame for later â folder not set yet ââââââââ
-            if not hasattr(self, '_pending_slot_frames'):
-                self._pending_slot_frames = []
-            if len(self._pending_slot_frames) < self.BEST_FRAME_COUNT:
-                sharp_now = sharpness_score(crop)
-                self._pending_slot_frames.append({
-                    'frame': frame.copy(), 'crop': crop.copy() if crop is not None else None,
-                    'sharp': sharp_now,
-                    'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                    'elapsed': elapsed,
-                })
-                print(f'[CAM2] â±ï¸  Pending slot cached (no folder yet) '
-                      f'â queue={len(self._pending_slot_frames)}  sharp={sharp_now:.0f}')
-            return
-
-        sharp     = sharpness_score(crop)
-        threshold = (self.MIN_SHARPNESS_ROI
-                     if self._roi_fallback else self.MIN_SHARPNESS)
-        if sharp < threshold:
-            return   # blurry â wait for a better frame
-
-        for idx, target in enumerate(self.CAPTURE_TARGETS):
-            if self._slots_saved[idx]:
-                continue   # already filled
-            if elapsed < target:
-                continue   # not time yet
-
-            # Fill this slot
-            self._capture_slots[idx] = {
-                'frame': frame.copy(),
-                'crop':  crop,
-                'sharp': sharp,
-                'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                'elapsed': elapsed,
-            }
-            self._slots_saved[idx] = True
-            self._save_slot_to_disk(idx, frame, crop, sharp)
-            break   # fill one slot per call
-
-    # âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-    #  SERIAL-APPEARED FRAMES  (main folder, 2 frames only)
-    # âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-
-    def _frame_is_valid(self, frame: np.ndarray, min_sharp: float = 5.0) -> bool:
-        """Return True if frame is non-empty, non-black, and sharp enough."""
-        if frame is None or frame.size == 0:
-            return False
-        # Brightness check â reject black/near-black frames
-        mean_val = float(frame.mean())
-        if mean_val < 8.0:
-            return False
-        # Sharpness check
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-        sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        return sharp >= min_sharp
+        """Disabled: slot saving replaced by 3:2 voting candidate capture."""
+        return
 
     def _save_serial_appeared_frame(self, frame: np.ndarray, crop: np.ndarray,
                                      x1: int, y1: int, x2: int, y2: int):
-        """
-        Save exactly 2 frames to the MAIN panel folder when serial_number class
-        first appears:
-          â¢ Appeared_1  â first detection frame
-          â¢ Appeared_Best â sharpest detection frame seen (updated until OCR done)
-        No blurry / empty frames accepted.
-        """
-        folder = self.panel_folder
-        if not folder or folder == ".":
-            return
-
-        if self.ocr_done:          # serial already confirmed â no more saves
-            return
-
-        if not self._frame_is_valid(frame, min_sharp=5.0):
-            return
-
-        # Fast sharpness on crop to avoid 60ms CPU freeze per frame
-        crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop is not None and crop.size > 0 else cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (320, 240))
-        sharp = float(cv2.Laplacian(crop_gray, cv2.CV_32F).var())
-        ts    = datetime.now().strftime("%H%M%S")
-        os.makedirs(folder, exist_ok=True)
-
-        # Frame 1 â first moment serial class appears
-        if not getattr(self, '_appeared_frame1_saved', False):
-            serial_dir = os.path.join(folder, "serial_captures")
-            os.makedirs(serial_dir, exist_ok=True)
-            path1 = os.path.join(serial_dir, "CAM2_Serial_Appeared_Frame1.jpg")
-            if cv2.imwrite(path1, frame, [cv2.IMWRITE_PNG_COMPRESSION, 0]):
-                self._appeared_frame1_saved = True
-                self._appeared_frame1_path  = path1
-                print(f"[CAM2] ð¸ Serial appeared (frame 1) â main folder  "
-                      f"sharp={sharp:.0f}")
-
-        # Frame Best â keep updating with sharpest frame until OCR confirmed
-        best_sharp = getattr(self, '_appeared_best_sharp', 0.0)
-        if sharp > best_sharp:
-            serial_dir = os.path.join(folder, "serial_captures")
-            os.makedirs(serial_dir, exist_ok=True)
-            path_best = os.path.join(serial_dir, "CAM2_Serial_Appeared_Best.jpg")
-            # Remove previous best file to avoid accumulation
-            old_best = getattr(self, '_appeared_best_path', None)
-            if old_best and os.path.exists(old_best) and old_best != path_best:
-                try: os.remove(old_best)
-                except Exception as e:
-                    print(f'[CAM2] ERROR: {e}'); import traceback; traceback.print_exc()
-            if cv2.imwrite(path_best, frame, [cv2.IMWRITE_PNG_COMPRESSION, 0]):
-                self._appeared_best_sharp = sharp
-                self._appeared_best_path  = path_best
-                print(f"[CAM2] ð¸ Serial appeared (best updated) sharp={sharp:.0f}")
-
-    # âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
-    #  SERIAL_CAPTURES SUBFOLDER  (structured 4-file save)
-    # âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+        """Disabled: zero full frames stored to eliminate disk write waste."""
+        return
 
     def _save_crop_to_serial_captures(self, crop, frame, x1, y1, x2, y2, tag="Exact", folder=None):
-        """Save exact detection crop and frames directly to serial_captures/ folder."""
-        eff_folder = folder if (folder and folder != ".") else self.panel_folder
-        if not eff_folder or eff_folder == ".":
-            return
-        serial_dir = os.path.join(eff_folder, "serial_captures")
-        try:
-            os.makedirs(serial_dir, exist_ok=True)
-        except Exception:
-            pass
-
-        ts = datetime.now().strftime("%H%M%S")
-        if crop is not None and crop.size > 0:
-            cv2.imwrite(os.path.join(serial_dir, f"CAM2_Exact_Crop_{ts}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            cv2.imwrite(os.path.join(serial_dir, "CAM2_Exact_Crop.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            cv2.imwrite(os.path.join(serial_dir, f"CAM2_Padded_Crop_{ts}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
-
-        if frame is not None and frame.size > 0:
-            cv2.imwrite(os.path.join(serial_dir, f"CAM2_Full_Frame_{ts}.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            cv2.imwrite(os.path.join(serial_dir, "CAM2_Best_Full.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            annotated = frame.copy()
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(annotated, f"serial {tag}", (x1, max(y1 - 8, 0)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.imwrite(os.path.join(serial_dir, f"CAM2_ROI_Annotated_{ts}.jpg"), annotated, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            cv2.imwrite(os.path.join(serial_dir, "CAM2_ROI_Annotated.jpg"), annotated, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            self.cam2_raw_path = os.path.join(serial_dir, f"CAM2_Full_Frame_{ts}.jpg")
-            self.cam2_roi_path = os.path.join(serial_dir, f"CAM2_Exact_Crop_{ts}.jpg")
-            print(f"[CAM2] Saved actual serial crop ({tag}) to {os.path.basename(serial_dir)}", flush=True)
+        """Disabled: only the 2 best exact crops are saved during 3:2 voting."""
+        return
 
     def _save_slot_to_disk(self, idx: int, frame: np.ndarray,
                             crop: np.ndarray, sharp: float):
-        """
-        Save serial detection frames to serial_captures/ subfolder.
-
-        Slot 1 (first detection):
-          â¢ CAM2_ROI_Annotated_HHMMSS.jpg  â full frame with bbox drawn
-          â¢ CAM2_Full_Frame_HHMMSS.jpg     â clean full frame
-          â¢ CAM2_Crop_HHMMSS.jpg           â exact YOLO detection crop
-          â¢ CAM2_Best_Full_HHMMSS.jpg      â copy of clean full (best so far)
-
-        Slot 2 (second detection):
-          â¢ Overwrites CAM2_Best_Full if this slot is sharper
-          â¢ Saves its own CAM2_Crop for voting diversity
-
-        No more than 2 slots saved (BEST_FRAME_COUNT = 2).
-        Quality-gated: blurry / empty frames rejected.
-        """
-        folder = self.panel_folder
-        if not folder or folder == ".":
-            return
-
-        # Quality gate
-        if not self._frame_is_valid(frame, min_sharp=5.0):
-            print(f"[CAM2] â ï¸  Slot {idx+1} rejected â invalid frame")
-            return
-        if crop is None or crop.size == 0:
-            print(f"[CAM2] â ï¸  Slot {idx+1} rejected â empty crop")
-            return
-
-        n   = idx + 1
-        ts  = datetime.now().strftime("%H%M%S")
-        serial_dir = os.path.join(folder, "serial_captures")
-        os.makedirs(serial_dir, exist_ok=True)
-
-        if n == 1:
-            # ââ ROI Annotated (full frame with detection box) âââââââââ
-            annotated = frame.copy()
-            cv2.rectangle(annotated, (x1 := self._capture_slots[idx]['x1'],
-                                       y1 := self._capture_slots[idx]['y1']),
-                          (self._capture_slots[idx]['x2'],
-                           self._capture_slots[idx]['y2']),
-                          (0, 255, 0), 2)
-            cv2.putText(annotated, "serial_number",
-                        (self._capture_slots[idx]['x1'],
-                         max(self._capture_slots[idx]['y1'] - 8, 0)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            roi_path = os.path.join(serial_dir, f"CAM2_ROI_Annotated_{ts}.jpg")
-            cv2.imwrite(roi_path, annotated, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-
-            # ââ Clean full frame ââââââââââââââââââââââââââââââââââââââ
-            full_path = os.path.join(serial_dir, f"CAM2_Full_Frame_{ts}.jpg")
-            cv2.imwrite(full_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-
-            # ââ Exact YOLO crop (Unpadded) âââââââââââââââââââââââââââââ
-            x1_exact, y1_exact = self._capture_slots[idx]['x1'], self._capture_slots[idx]['y1']
-            x2_exact, y2_exact = self._capture_slots[idx]['x2'], self._capture_slots[idx]['y2']
-            unpadded_crop = frame[y1_exact:y2_exact, x1_exact:x2_exact].copy()
-            exact_path = os.path.join(serial_dir, f"CAM2_Exact_Crop_{ts}.jpg")
-            if unpadded_crop.size > 0:
-                cv2.imwrite(exact_path, unpadded_crop, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-
-            # ââ Padded YOLO crop ââââââââââââââââââââââââââââââââââââââââ
-            crop_path = os.path.join(serial_dir, f"CAM2_Padded_Crop_{ts}.jpg")
-            cv2.imwrite(crop_path, crop, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-
-            # ââ Best full frame (slot 1 is initial best) ââââââââââââââ
-            best_path = os.path.join(serial_dir, "CAM2_Best_Full.jpg")
-            cv2.imwrite(best_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-            self._best_full_sharp = sharp
-
-            # Track for PDF linking
-            self.cam2_raw_path = full_path
-            self.cam2_roi_path  = crop_path
-
-            print(f"[CAM2] ð¸ serial_captures/ slot 1 â sharp={sharp:.0f}")
-            print(f"       ROI annotated : {os.path.basename(roi_path)}")
-            print(f"       Full frame    : {os.path.basename(full_path)}")
-            print(f"       Crop          : {os.path.basename(crop_path)}")
-            print(f"       Best full     : CAM2_Best_Full.jpg")
-
-        else:
-            # ââ Slot 2: extra crops for voting diversity ââââââââââââââââ
-            x1_exact, y1_exact = self._capture_slots[idx]['x1'], self._capture_slots[idx]['y1']
-            x2_exact, y2_exact = self._capture_slots[idx]['x2'], self._capture_slots[idx]['y2']
-            unpadded_crop2 = frame[y1_exact:y2_exact, x1_exact:x2_exact].copy()
-            exact2_path = os.path.join(serial_dir, f"CAM2_Exact_Crop_2_{ts}.jpg")
-            if unpadded_crop2.size > 0:
-                cv2.imwrite(exact2_path, unpadded_crop2, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-
-            crop2_path = os.path.join(serial_dir, f"CAM2_Padded_Crop_2_{ts}.jpg")
-            cv2.imwrite(crop2_path, crop, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-
-            # ââ Update Best_Full if this slot is sharper ââââââââââââââ
-            best_path = os.path.join(serial_dir, "CAM2_Best_Full.jpg")
-            prev_sharp = getattr(self, '_best_full_sharp', 0.0)
-            if sharp > prev_sharp:
-                cv2.imwrite(best_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-                self._best_full_sharp = sharp
-                print(f"[CAM2] ð¸ serial_captures/ slot 2 â Best_Full updated "
-                      f"sharp={sharp:.0f}")
-            else:
-                print(f"[CAM2] ð¸ serial_captures/ slot 2 â extra crop saved "
-                      f"sharp={sharp:.0f}")
-
-        # Run live OCR on each slot asynchronously so camera loop NEVER freezes
-        if _PADDLE_OK and self.paddle_reader is not None:
-            def _async_slot_ocr(slot_crop, slot_n, slot_dir, slot_ts, slot_sharp):
-                print(f"[CAM2] [ASYNC-OCR] Slot {slot_n} started...", flush=True)
-                try:
-                    slot_serial = self._ocr_pipeline(slot_crop)
-                    if slot_serial:
-                        print(f"[CAM2] [ASYNC-OCR] Slot {slot_n} result: '{slot_serial}'", flush=True)
-                        with self._lock:
-                            self.partial_serial = slot_serial
-                            self.status = f"Slot {slot_n}: {slot_serial}"
-                    else:
-                        print(f"[CAM2] [ASYNC-OCR] Slot {slot_n}: no serial extracted", flush=True)
-
-                    ocr_txt = os.path.join(slot_dir, f"Slot_{slot_n}_OCR.txt")
-                    with open(ocr_txt, "w", encoding="utf-8") as f:
-                        f.write(f"Slot {slot_n} OCR  sharp={slot_sharp:.0f}  ts={slot_ts}\n")
-                        f.write(f"\nExtracted: {slot_serial}\n")
-                except Exception as e:
-                    print(f"[CAM2] Async Live OCR error: {e}", flush=True)
-
-            threading.Thread(target=_async_slot_ocr,
-                             args=(crop.copy(), n, serial_dir, ts, sharp),
-                             daemon=True).start()
+        """Disabled: replaced by 3:2 voting candidate save."""
+        return
 
     def _all_slots_filled(self) -> bool:
         return all(self._slots_saved)
@@ -1707,14 +1454,6 @@ class Camera2OCR:
 
         ch, cw = crop.shape[:2]
 
-        # ── save raw crop ─────────────────────────────────────────────
-        if sd:
-            try:
-                cv2.imwrite(os.path.join(sd, "last_raw_crop.jpg"),
-                            crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            except Exception as e:
-                print(f'[CAM2] ERROR: {e}'); import traceback; traceback.print_exc()
-
         # ── sharpness ─────────────────────────────────────────────────
         _gray  = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
         _sharp = float(cv2.Laplacian(_gray, cv2.CV_64F).var())
@@ -1724,12 +1463,6 @@ class Camera2OCR:
         # ── 2× resize ─────────────────────────────────────────────────
         ocr_input = cv2.resize(crop, (cw * 2, ch * 2),
                                interpolation=cv2.INTER_CUBIC)
-        if sd:
-            try:
-                cv2.imwrite(os.path.join(sd, "last_ocr_input.jpg"),
-                            ocr_input, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            except Exception as e:
-                print(f'[CAM2] ERROR: {e}'); import traceback; traceback.print_exc()
 
         # ── device string ─────────────────────────────────────────────
         _dev_str = 'None'
@@ -2104,48 +1837,45 @@ class Camera2OCR:
                 if (detected
                         and crop is not None
                         and not self.ocr_done):
-                    
-                                        # Save sharpest resting detection to serial_captures immediately
-                    _c_sharp = sharpness_score(crop)
-                    if _c_sharp > getattr(self, '_best_crop_sharp', 0.0) and getattr(self, 'panel_folder', None) and self.panel_folder != '.':
-                        self._best_crop_sharp = _c_sharp
-                        self._save_crop_to_serial_captures(crop, frame, x1, y1, x2, y2, tag="Best", folder=self.panel_folder)
 
                     if not self._is_scanning:
                         _conf = (self._latest_det[4]
                                  if self._latest_det is not None else 0.0)
-                        print("[CAM2-OCR] 🚀 STARTING OCR FROM CAMERA2 SERIAL DETECTION",
+                        print(f"[CAM2-OCR] 🚀 STARTING OCR FROM CAMERA2 SERIAL DETECTION (conf={_conf:.3f}, folder={self.panel_folder})",
                               flush=True)
-                        print(f"[CAM2-OCR]    confidence={_conf:.3f}  "
-                              f"folder={self.panel_folder}", flush=True)
                         self.start_ocr()
-                        print(f"[CAM2-OCR]    _is_scanning={self._is_scanning}",
-                              flush=True)
 
                     _now = time.time()
-                    if self._ocr_crop_queue.empty() and (_now - getattr(self, '_last_ocr_push_ts', 0.0) >= 0.4):
-                        self._last_ocr_push_ts = _now
-                        elapsed = _now - self._scan_start_ts_ref[0]
-                        try:
-                            # CHANGE 4: item is a dict — carries panel context
-                            # so OCR worker always uses the folder/session that
-                            # was active at CAPTURE time, not at RECEIVE time.
-                            _item = {
-                                'crop':          crop.copy(),
-                                'frame':         frame.copy(),
-                                'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                                'elapsed':       elapsed,
-                                'panel_id':      self._current_panel_id,
-                                'panel_folder':  self.panel_folder,
-                                'session_id':    self._panel_session_id,
-                                'capture_ts':    _now,
-                            }
-                            self._ocr_crop_queue.put_nowait(_item)
-                            print(f"[CAM2] Crop queued  session={self._panel_session_id}"
-                                  f"  folder={os.path.basename(self.panel_folder or '?')}"
-                                  f"  Queue={self._ocr_crop_queue.qsize()}", flush=True)
-                        except Exception as e:
-                            print(f"[CAM2-YOLO] Queue push error: {e}")
+                    # ── Capture 3 candidate frames with 120ms interval gate ──
+                    if self._ocr_crop_queue.empty() and (_now - getattr(self, '_last_candidate_ts', 0.0) >= 0.12):
+                        self._last_candidate_ts = _now
+                        ih, iw = frame.shape[:2]
+                        ex1, ey1 = max(0, x1), max(0, y1)
+                        ex2, ey2 = min(iw, x2), min(ih, y2)
+                        exact_crop = frame[ey1:ey2, ex1:ex2].copy()
+                        if exact_crop.size == 0:
+                            exact_crop = crop.copy()
+                        _c_sharp = sharpness_score(exact_crop)
+
+                        with self._candidate_lock:
+                            self._candidate_crops.append({
+                                'crop':       exact_crop,
+                                'sharp':      _c_sharp,
+                                'x1': ex1, 'y1': ey1, 'x2': ex2, 'y2': ey2,
+                                'session_id': self._panel_session_id,
+                                'folder':     self.panel_folder,
+                                'capture_ts': _now,
+                            })
+                            c_count = len(self._candidate_crops)
+                            print(f"[CAM2] 📸 Candidate crop {c_count}/3 captured (sharp={_c_sharp:.1f})", flush=True)
+                            if c_count >= 3:
+                                batch = list(self._candidate_crops[:3])
+                                self._candidate_crops = []
+                                try:
+                                    self._ocr_crop_queue.put_nowait(batch)
+                                    print(f"[CAM2] 🚀 3 candidates queued for 3:2 voting confirmation", flush=True)
+                                except Exception as e:
+                                    print(f"[CAM2-YOLO] Queue push error: {e}")
                 elif detected and crop is not None and not self._is_scanning:
                     print(f"[CAM2-YOLO] Detection ready but _is_scanning=False (waiting for start_ocr)")
                 elif not detected:
@@ -2410,113 +2140,170 @@ class Camera2OCR:
                                 flush=True
                             )
 
-                        # 2. Block until a crop arrives (1s timeout to check running)
+                        # 2. Block until a crop batch arrives (1s timeout to check running)
                         try:
                             _raw = self._ocr_crop_queue.get(timeout=1)
                         except _queue_mod.Empty:
                             continue
 
-                        print(
-                            f"[CAM2-OCR] ✅ Crop received "
-                            f"Queue={self._ocr_crop_queue.qsize()}",
-                            flush=True
-                        )
-
-                        # TASK 1 / FINAL AUDIT FIX: unpack dict — always use
-                        # item["panel_folder"], NEVER self.panel_folder.
-                        # Fallback is '.' (safe no-op) not self.panel_folder
-                        # (which may already point at Panel B by the time this
-                        # item is processed).
-                        if isinstance(_raw, dict):
-                            crop            = _raw['crop']
-                            frame           = _raw['frame']
-                            x1, y1          = _raw['x1'], _raw['y1']
-                            x2, y2          = _raw['x2'], _raw['y2']
-                            elapsed         = _raw['elapsed']
-                            item_session    = _raw.get('session_id',   self._panel_session_id)
-                            # SAFE FALLBACK: use '.' not self.panel_folder
-                            item_folder     = _raw.get('panel_folder') or '.'
-                            item_panel_id   = _raw.get('panel_id',     None)
-                            item_capture_ts = _raw.get('capture_ts',   0.0)
-                        else:
-                            # Legacy tuple fallback — no folder context available.
-                            # Use '.' (safe no-op save) rather than self.panel_folder
-                            # which may now be Panel B's folder.
-                            crop, frame, x1, y1, x2, y2, elapsed = _raw
-                            item_session    = self._panel_session_id
-                            item_folder     = '.'   # SAFE: never self.panel_folder
-                            item_panel_id   = None
-                            item_capture_ts = 0.0
+                        # ── Helper for calling OCR microservice (port 5001) ──
+                        def _eval_crop_for_ocr(crp):
+                            if crp is None or crp.size == 0:
+                                return "", 0.0, None
+                            ch, cw = crp.shape[:2]
+                            import cv2 as _cv2
+                            if ch < 40:
+                                ocr_inp = _cv2.resize(crp, (cw * 2, ch * 2), interpolation=_cv2.INTER_CUBIC)
+                            else:
+                                ocr_inp = crp
+                            _c_res = _call_ocr_service(ocr_inp)
+                            rt, sc = _c_res[0], _c_res[1]
+                            sn = _c_res[2] if len(_c_res) > 2 else None
+                            sn = sn or (_correct_serial(rt) if rt else None)
+                            return rt, sc, sn
 
                         cur_session = self._panel_session_id
 
-                        # FIX 5b: compact per-item diagnostic
-                        print(
-                            f"[OCR] Processing crop | "
-                            f"session={item_session} | "
-                            f"panel={item_panel_id}",
-                            flush=True
-                        )
-                        print(f"[OCR] Queue Session   = {item_session}", flush=True)
-                        print(f"[OCR] Current Session = {cur_session}",  flush=True)
-                        print(f"[OCR] Panel Folder    = {item_folder}",  flush=True)
+                        # ── Handle 3-Candidate Batch (3:2 Voting Ratio) ───────
+                        if isinstance(_raw, list) and len(_raw) == 3:
+                            batch = _raw
+                            item_session = batch[0].get('session_id', cur_session)
+                            item_folder = batch[0].get('folder') or self.panel_folder or '.'
 
-                        # 3. Skip if already confirmed
-                        if self.ocr_done:
-                            print("[CAM2-OCR] ocr_done=True — skip", flush=True)
-                            self._ocr_crop_queue.task_done()   # TASK 2: always task_done
-                            continue
+                            if self.ocr_done:
+                                print("[CAM2-OCR] ocr_done=True — skip batch", flush=True)
+                                self._ocr_crop_queue.task_done()
+                                continue
 
-                        # TASK 1 / TASK 4: Discard stale items from old panel
-                        if item_session != cur_session:
-                            print(f"[OCR] STALE ITEM DISCARDED  "
-                                  f"item_session={item_session}  "
-                                  f"current={cur_session}", flush=True)
-                            self._ocr_crop_queue.task_done()   # TASK 2: always task_done
-                            continue
+                            if item_session != cur_session:
+                                print(f"[OCR] STALE BATCH DISCARDED item_session={item_session} current={cur_session}", flush=True)
+                                self._ocr_crop_queue.task_done()
+                                continue
 
-                        # 5. Smart resize -- upscale only if small, never crush text
-                        _frame += 1
-                        ch, cw = crop.shape[:2]
-                        import cv2 as _cv2
-                        if ch < 40:
-                            ocr_input = _cv2.resize(crop, (cw * 2, ch * 2), interpolation=_cv2.INTER_CUBIC)
-                        else:
-                            ocr_input = crop
+                            # 1. Sort the 3 candidates by sharpness score (descending)
+                            batch.sort(key=lambda c: c['sharp'], reverse=True)
+                            best_1 = batch[0]   # Top sharpest exact crop
+                            best_2 = batch[1]   # 2nd sharpest exact crop
+                            cand_3 = batch[2]   # 3rd candidate
 
-                        # 6+7. Call OCR microservice (port 5001)
-                        print("[CAM2-OCR] -> Calling OCR service on crop", flush=True)
-                        _call_res = _call_ocr_service(ocr_input)
-                        raw_text, _svc_score = _call_res[0], _call_res[1]
-                        svc_serial = _call_res[2] if len(_call_res) > 2 else None
-                        print(f"[CAM2-OCR] service returned: {repr(raw_text)} score={_svc_score:.3f} serial={svc_serial}", flush=True)
+                            # 2. Save ONLY the 2 best exact crops into serial_captures/ (ZERO full frames)
+                            if item_folder and item_folder not in ('.', ''):
+                                serial_dir = os.path.join(item_folder, "serial_captures")
+                                try:
+                                    os.makedirs(serial_dir, exist_ok=True)
+                                    crop1_path = os.path.join(serial_dir, "CAM2_Crop_1.jpg")
+                                    crop2_path = os.path.join(serial_dir, "CAM2_Crop_2.jpg")
+                                    cv2.imwrite(crop1_path, best_1['crop'], [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                    cv2.imwrite(crop2_path, best_2['crop'], [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                    self.cam2_roi_path = crop1_path
+                                    self.cam2_raw_path = crop1_path
+                                    print(f"[CAM2] 📸 Saved 2 best exact crops to serial_captures/ (Crop 1 sharp={best_1['sharp']:.1f}, Crop 2 sharp={best_2['sharp']:.1f})", flush=True)
+                                except Exception as se:
+                                    print(f"[CAM2] Error saving 2 best crops: {se}", flush=True)
 
-                        # 8. Validate serial
-                        serial = svc_serial or (_correct_serial(raw_text) if raw_text else None)
+                            # 3. OCR Evaluation with 3:2 Voting Ratio
+                            print(f"[CAM2-VOTE] 🔍 Evaluating Best Crop 1 (sharp={best_1['sharp']:.1f})...", flush=True)
+                            raw1, sc1, s1 = _eval_crop_for_ocr(best_1['crop'])
+                            print(f"[CAM2-VOTE] Crop 1 result: raw={repr(raw1)} score={sc1:.2f} -> serial={s1}", flush=True)
 
-                        if raw_text:
-                            print(f"[OCR] Candidate    = {repr(raw_text)}", flush=True)
-                        if serial:
-                            print(f"[CAM2-OCR] Validated Serial={serial}", flush=True)
-                        else:
-                            reason = "empty text" if not raw_text else f"validation failed for {repr(raw_text)}"
-                            print(f"[OCR] Rejected Reason = {reason}", flush=True)
+                            print(f"[CAM2-VOTE] 🔍 Evaluating Best Crop 2 (sharp={best_2['sharp']:.1f})...", flush=True)
+                            raw2, sc2, s2 = _eval_crop_for_ocr(best_2['crop'])
+                            print(f"[CAM2-VOTE] Crop 2 result: raw={repr(raw2)} score={sc2:.2f} -> serial={s2}", flush=True)
 
-                        if not serial:
+                            confirmed_serial = None
+                            consensus_reason = ""
+                            raw3, sc3, s3 = "", 0.0, None
+
+                            # Voting Rule A: 2/2 match on Best 2 crops (satisfies 3:2 quorum)
+                            if s1 and s2 and s1 == s2:
+                                confirmed_serial = s1
+                                consensus_reason = f"2/2 match between Best Crop 1 and Best Crop 2 ({s1})"
+                                print(f"[CAM2-VOTE] 🎯 3:2 CONFIRMED: {consensus_reason}", flush=True)
+                            else:
+                                # Voting Rule B: Test candidate 3 to form 3-sample voting
+                                print(f"[CAM2-VOTE] 🔍 Best 2 crops differ or incomplete. Evaluating Candidate 3 (sharp={cand_3['sharp']:.1f})...", flush=True)
+                                raw3, sc3, s3 = _eval_crop_for_ocr(cand_3['crop'])
+                                print(f"[CAM2-VOTE] Crop 3 result: raw={repr(raw3)} score={sc3:.2f} -> serial={s3}", flush=True)
+
+                                valid_list = [s for s in [s1, s2, s3] if s]
+                                counts = Counter(valid_list)
+                                if counts:
+                                    top_s, top_v = counts.most_common(1)[0]
+                                    if top_v >= 2:
+                                        confirmed_serial = top_s
+                                        consensus_reason = f"2/3 match across 3 candidates ({top_s} with {top_v}/3 votes)"
+                                        print(f"[CAM2-VOTE] 🎯 3:2 CONFIRMED: {consensus_reason}", flush=True)
+
+                                # Voting Rule C: Character position voting across candidates (10 chars format)
+                                if not confirmed_serial and len(valid_list) >= 2:
+                                    tens = [s for s in valid_list if len(s) == 10]
+                                    if len(tens) >= 2:
+                                        pos_chars = []
+                                        all_ok = True
+                                        for p in range(10):
+                                            p_votes = Counter([s[p] for s in tens])
+                                            p_top, p_cnt = p_votes.most_common(1)[0]
+                                            if p_cnt >= 2:
+                                                pos_chars.append(p_top)
+                                            else:
+                                                all_ok = False
+                                                break
+                                        if all_ok:
+                                            composed = "".join(pos_chars)
+                                            val_comp = _correct_serial(composed)
+                                            if val_comp:
+                                                confirmed_serial = val_comp
+                                                consensus_reason = f"Position character voting confirmed in 3:2 ratio ({val_comp})"
+                                                print(f"[CAM2-VOTE] 🎯 3:2 CONFIRMED: {consensus_reason}", flush=True)
+
+                            if confirmed_serial:
+                                self.partial_serial = confirmed_serial
+                                # Write serial_ocr_result.txt in panel folder
+                                if item_folder and item_folder not in ('.', ''):
+                                    try:
+                                        res_path = os.path.join(item_folder, "serial_ocr_result.txt")
+                                        with open(res_path, "w", encoding="utf-8") as rf:
+                                            rf.write(f"Serial:    {confirmed_serial}\n"
+                                                     f"Timestamp: {datetime.now().isoformat()}\n"
+                                                     f"Session:   {item_session}\n"
+                                                     f"Ratio:     3:2 Voting Confirmation\n"
+                                                     f"Method:    SSP_TAILGATE_SERIAL.pt + PaddleOCR (port 5001)\n"
+                                                     f"Consensus: {consensus_reason}\n"
+                                                     f"Crop 1:    {s1} (sharp={best_1['sharp']:.1f}, score={sc1:.2f}, raw={repr(raw1)})\n"
+                                                     f"Crop 2:    {s2} (sharp={best_2['sharp']:.1f}, score={sc2:.2f}, raw={repr(raw2)})\n"
+                                                     f"Crop 3:    {s3} (sharp={cand_3['sharp']:.1f}, score={sc3:.2f}, raw={repr(raw3)})\n")
+                                        print(f"[CAM2] serial_ocr_result.txt written to {os.path.basename(item_folder)}", flush=True)
+                                    except Exception as fe:
+                                        print(f"[CAM2] Result file write error: {fe}", flush=True)
+
+                                self._ocr_crop_queue.task_done()
+                                self._confirm_serial(confirmed_serial, panel_folder=item_folder, session_id=item_session)
+                                continue
+                            else:
+                                print(f"[CAM2-VOTE] ⚠️ Inconclusive 3:2 voting batch (s1={s1}, s2={s2}, s3={s3}). Retrying next 3 frames...", flush=True)
+                                self.status = "Voting inconclusive, recapturing..."
+                                self._ocr_crop_queue.task_done()
+                                continue
+
+                        # ── Legacy single item fallback ───────────────────────
+                        elif isinstance(_raw, dict):
+                            crop = _raw['crop']
+                            item_session = _raw.get('session_id', cur_session)
+                            item_folder = _raw.get('panel_folder') or self.panel_folder or '.'
+                            if self.ocr_done or item_session != cur_session:
+                                self._ocr_crop_queue.task_done()
+                                continue
+                            raw_t, sc, sn = _eval_crop_for_ocr(crop)
+                            if sn:
+                                self.partial_serial = sn
+                                self._ocr_crop_queue.task_done()
+                                self._confirm_serial(sn, panel_folder=item_folder, session_id=item_session)
+                                continue
                             self._ocr_crop_queue.task_done()
                             continue
-
-                        # 9. Serial found! Save the confirmed crop to serial_captures/
-                        self.partial_serial = serial
-                        print(f"[CAM2-OCR] SERIAL CONFIRMED={serial}", flush=True)
-                        self._save_crop_to_serial_captures(crop, frame, x1, y1, x2, y2, tag="Confirmed", folder=item_folder)
-                        self._ocr_crop_queue.task_done()
-                        self._confirm_serial(serial, panel_folder=item_folder, session_id=item_session)
-                        continue
-
-                        # TASK 2: task_done for every path that reaches here
-                        self._ocr_crop_queue.task_done()
-
+                        else:
+                            self._ocr_crop_queue.task_done()
+                            continue
                     except Exception as _inner_e:
                         # TASK 2: always call task_done even on exception
                         if _raw is not None:

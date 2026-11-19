@@ -328,8 +328,17 @@ def generate_pdf_report(serial_number, panel_folder, seq_times=None, total_time=
             row_labels.append(Paragraph("<b>Best full frame (sharpest)</b>", sub_style))
             row_imgs.append(_fit_image(_best_full_path, half_w, 3.5*inch))
             print(f"  [PDF] Best full → {os.path.basename(_best_full_path)}")
-
-        if _crop_frames and os.path.exists(_crop_frames[0]):
+            if _crop_frames and os.path.exists(_crop_frames[0]):
+                row_labels.append(Paragraph("<b>Crop (exact detection region)</b>", sub_style))
+                row_imgs.append(_fit_image(_crop_frames[0], half_w, 3.5*inch))
+                print(f"  [PDF] Crop → {os.path.basename(_crop_frames[0])}")
+        elif len(_crop_frames) >= 2 and os.path.exists(_crop_frames[0]) and os.path.exists(_crop_frames[1]):
+            row_labels.append(Paragraph("<b>Serial Crop 1 (sharpest)</b>", sub_style))
+            row_imgs.append(_fit_image(_crop_frames[0], half_w, 3.5*inch))
+            row_labels.append(Paragraph("<b>Serial Crop 2</b>", sub_style))
+            row_imgs.append(_fit_image(_crop_frames[1], half_w, 3.5*inch))
+            print(f"  [PDF] Serial crops → {os.path.basename(_crop_frames[0])}, {os.path.basename(_crop_frames[1])}")
+        elif _crop_frames and os.path.exists(_crop_frames[0]):
             row_labels.append(Paragraph("<b>Crop (exact detection region)</b>", sub_style))
             row_imgs.append(_fit_image(_crop_frames[0], half_w, 3.5*inch))
             print(f"  [PDF] Crop → {os.path.basename(_crop_frames[0])}")
