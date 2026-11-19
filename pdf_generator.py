@@ -173,7 +173,7 @@ def generate_pdf_report(serial_number, panel_folder, seq_times=None, total_time=
 
     # ── PAGE 2: SEQ 1 FULL ───────────────────────────────────
     story.append(Paragraph("Sequence 1 — Full Panel Image", h1_style))
-    files = _find_best(panel_folder, "*_Seq1_Full_*.jpg", "SSP-SEQ_Seq1_Full_*.jpg", "*Seq1*Full*.jpg")
+    files = _find_best(panel_folder, "*_sequence_1*.jpg", "SSP-SEQ_sequence_1*.jpg", "*_Seq1_Full_*.jpg", "SSP-SEQ_Seq1_Full_*.jpg", "*Seq1*Full*.jpg")
     if files:
         story.append(_fit_image(files[0], USABLE_W, 7*inch))
         print(f"  [PDF] SEQ1: {os.path.basename(files[0])}")
@@ -233,7 +233,7 @@ def generate_pdf_report(serial_number, panel_folder, seq_times=None, total_time=
 
     # ── PAGE 4: SEQ 2 FULL ───────────────────────────────────
     story.append(Paragraph("Sequence 2 — Full Panel Image", h1_style))
-    files = _find_best(panel_folder, "*_Seq2_Full_*.jpg", "SSP-SEQ_Seq2_Full_*.jpg", "*Seq2*Full*.jpg")
+    files = _find_best(panel_folder, "*_sequence_2*.jpg", "SSP-SEQ_sequence_2*.jpg", "*_Seq2_Full_*.jpg", "SSP-SEQ_Seq2_Full_*.jpg", "*Seq2*Full*.jpg")
     if files:
         story.append(_fit_image(files[0], USABLE_W, 7*inch))
         print(f"  [PDF] SEQ2: {os.path.basename(files[0])}")
@@ -244,7 +244,7 @@ def generate_pdf_report(serial_number, panel_folder, seq_times=None, total_time=
 
     # ── PAGE 5: SEQ 3 FULL ───────────────────────────────────
     story.append(Paragraph("Sequence 3 — Full Panel Image", h1_style))
-    files = _find_best(panel_folder, "*_Seq3_Full_*.jpg", "SSP-SEQ_Seq3_Full_*.jpg", "*Seq3*Full*.jpg")
+    files = _find_best(panel_folder, "*_sequence_3*.jpg", "SSP-SEQ_sequence_3*.jpg", "*_Seq3_Full_*.jpg", "SSP-SEQ_Seq3_Full_*.jpg", "*Seq3*Full*.jpg")
     if files:
         story.append(_fit_image(files[0], USABLE_W, 7*inch))
         print(f"  [PDF] SEQ3: {os.path.basename(files[0])}")

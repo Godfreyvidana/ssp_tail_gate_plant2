@@ -1345,7 +1345,9 @@ class Camera2OCR:
 
         # Frame 1 â first moment serial class appears
         if not getattr(self, '_appeared_frame1_saved', False):
-            path1 = os.path.join(folder, "best1.png")
+            serial_dir = os.path.join(folder, "serial_captures")
+            os.makedirs(serial_dir, exist_ok=True)
+            path1 = os.path.join(serial_dir, "CAM2_Serial_Appeared_Frame1.jpg")
             if cv2.imwrite(path1, frame, [cv2.IMWRITE_PNG_COMPRESSION, 0]):
                 self._appeared_frame1_saved = True
                 self._appeared_frame1_path  = path1
@@ -1355,7 +1357,9 @@ class Camera2OCR:
         # Frame Best â keep updating with sharpest frame until OCR confirmed
         best_sharp = getattr(self, '_appeared_best_sharp', 0.0)
         if sharp > best_sharp:
-            path_best = os.path.join(folder, "best2.png")
+            serial_dir = os.path.join(folder, "serial_captures")
+            os.makedirs(serial_dir, exist_ok=True)
+            path_best = os.path.join(serial_dir, "CAM2_Serial_Appeared_Best.jpg")
             # Remove previous best file to avoid accumulation
             old_best = getattr(self, '_appeared_best_path', None)
             if old_best and os.path.exists(old_best) and old_best != path_best:

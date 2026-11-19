@@ -830,6 +830,13 @@
             user-select: none;
         }
 
+        /* RED BANNER → Capturing / Remove Hand Warning */
+        #landscape-alert-banner.alert-red {
+            display: block;
+            background: linear-gradient(90deg, #d32f2f, #b71c1c);
+            animation: landscape-pulse 0.7s ease-in-out infinite;
+        }
+
         /* SEQ2 → Orange pulse */
         #landscape-alert-banner.alert-seq2 {
             display: block;
@@ -1472,7 +1479,7 @@
         // ── Real-time status polling ──────────────────────────────────
         function startStatusPolling() {
             if (statusInterval) clearInterval(statusInterval);
-            statusInterval = setInterval(fetchStatus, 1000);
+            statusInterval = setInterval(fetchStatus, 300);
         }
 
         // ── Start / restart the MJPEG feed ───────────────────────────
@@ -2279,8 +2286,15 @@
                 "seq3":     "alert-seq3",
                 "captured": "alert-captured"
             };
-            function updateBanner(alert) {
-                if (alert === prevAlert) return;
+            function updateBanner(alert, bannerText, bannerType) {
+                if (bannerText && bannerType) {
+                    banner.innerHTML  = bannerText;
+                    banner.className  = bannerType;
+                    body.classList.add("landscape-alert-visible");
+                    prevAlert = "";
+                    return;
+                }
+                if (alert === prevAlert && !bannerText) return;
                 prevAlert = alert;
                 banner.className = "";
                 body.classList.remove("landscape-alert-visible");
@@ -2288,27 +2302,6 @@
                     banner.innerHTML  = MESSAGES[alert];
                     banner.className  = CLASS_MAP[alert] || "";
                     body.classList.add("landscape-alert-visible");
-                    // ── Voice alert via browser TTS ────────────────────────
-                    // Temporarily disabled: Browser TTS may freeze the camera stream on some devices.
-                    // The backend (espeak) will still provide voice alerts.
-                    /*
-                    if (alert === "seq2") {
-                        speakAlert(
-                            'Sequence 2 — Please place the panel in landscape position for image capture.',
-                            'வரிசை 2 — படம் எடுக்க பேனலை லேண்ட்ஸ்கேப் நிலையில் வைக்கவும்.'
-                        );
-                    } else if (alert === "seq3") {
-                        speakAlert(
-                            'Sequence 3 — Please place the panel in landscape position for image capture.',
-                            'வரிசை 3 — படம் எடுக்க பேனலை லேண்ட்ஸ்கேப் நிலையில் வைக்கவும்.'
-                        );
-                    } else if (alert === "captured") {
-                        speakAlert(
-                            'Image captured successfully.',
-                            'படம் வெற்றிகரமாக எடுக்கப்பட்டது.'
-                        );
-                    }
-                    */
                 }
             }
             const _origFetch = window.fetch;
@@ -2316,7 +2309,7 @@
                 return _origFetch.apply(this, arguments).then(function (resp) {
                     if (typeof url === "string" && url.indexOf("sequence_status") !== -1) {
                         resp.clone().json().then(function (data) {
-                            updateBanner(data.landscape_alert || "");
+                            updateBanner(data.landscape_alert || "", data.banner_text || "", data.banner_type || "");
                         }).catch(function () {});
                     }
                     return resp;
@@ -2334,7 +2327,7 @@
                     xhr.addEventListener("load", function () {
                         try {
                             const data = JSON.parse(xhr.responseText);
-                            updateBanner(data.landscape_alert || "");
+                            updateBanner(data.landscape_alert || "", data.banner_text || "", data.banner_type || "");
                         } catch (e) {}
                     });
                 }

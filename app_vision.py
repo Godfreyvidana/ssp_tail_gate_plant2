@@ -248,11 +248,46 @@ _config_path_early = os.path.join(SCRIPT_DIR, "config.json")
 _SEQUENCE_MODEL_REL = None
 _SERIAL_MODEL_REL   = None
 EXPECTED_CAM1_W, EXPECTED_CAM1_H = 1920, 1080
+
+APP_CONFIG = {}
+
+def load_app_config():
+    global APP_CONFIG, CAPTURE_DELAY_SECS, PROGRESS_BAR_DURATION_SECS, SEQ1_NORMAL_FRAMES, SEQ1_FALLBACK_FRAMES, SEQ_WIPE_SECONDS
+    cfg_file = os.path.join(SCRIPT_DIR, "config.json")
+    if os.path.exists(cfg_file):
+        try:
+            import json as _j
+            with open(cfg_file, 'r') as f:
+                APP_CONFIG.clear()
+                APP_CONFIG.update(_j.load(f))
+            CAPTURE_DELAY_SECS = float(APP_CONFIG.get('capture_delay_secs', 3.0))
+            PROGRESS_BAR_DURATION_SECS = float(APP_CONFIG.get('progress_bar_duration_secs', 5.0))
+            SEQ1_NORMAL_FRAMES = int(APP_CONFIG.get('seq1_normal_frames', 2))
+            SEQ1_FALLBACK_FRAMES = int(APP_CONFIG.get('seq1_fallback_frames', 2))
+            SEQ_WIPE_SECONDS = float(APP_CONFIG.get('seq_wipe_seconds', 5.0))
+        except Exception as e:
+            print(f"[CONFIG] Error loading {cfg_file}: {e}")
+
+def get_capture_delay(seq_id):
+    k = f"seq{seq_id}_capture_delay_secs"
+    if k in APP_CONFIG:
+        try: return float(APP_CONFIG[k])
+        except Exception: pass
+    return float(APP_CONFIG.get('capture_delay_secs', CAPTURE_DELAY_SECS))
+
+def get_wipe_duration(seq_id):
+    k = f"seq{seq_id}_wipe_seconds"
+    if k in APP_CONFIG:
+        try: return float(APP_CONFIG[k])
+        except Exception: pass
+    return float(APP_CONFIG.get('progress_bar_duration_secs', PROGRESS_BAR_DURATION_SECS))
+
 if os.path.exists(_config_path_early):
     try:
         import json as _json_early
         with open(_config_path_early, 'r') as _f:
             _cfg_early = _json_early.load(_f)
+            APP_CONFIG.update(_cfg_early)
             _SEQUENCE_MODEL_REL = _cfg_early.get('sequence_model') or _cfg_early.get('sequence_model_path')
             _SERIAL_MODEL_REL   = _cfg_early.get('serial_model') or _cfg_early.get('serial_model_path')
             _w_cfg = _cfg_early.get('stream_ui_width')
@@ -268,6 +303,11 @@ if os.path.exists(_config_path_early):
                     EXPECTED_CAM1_W, EXPECTED_CAM1_H = _ew, _eh
                 except Exception:
                     pass
+            CAPTURE_DELAY_SECS = float(_cfg_early.get('capture_delay_secs', 3.0))
+            PROGRESS_BAR_DURATION_SECS = float(_cfg_early.get('progress_bar_duration_secs', 5.0))
+            SEQ1_NORMAL_FRAMES = int(_cfg_early.get('seq1_normal_frames', 2))
+            SEQ1_FALLBACK_FRAMES = int(_cfg_early.get('seq1_fallback_frames', 2))
+            SEQ_WIPE_SECONDS = float(_cfg_early.get('seq_wipe_seconds', 5.0))
     except Exception:
         pass
 
@@ -550,6 +590,10 @@ class PanelDetectionState:
         self._seq3_cap_announced    = False
         self._seq2_prompted         = False
         self._seq3_prompted         = False
+
+        # ── Banner alerts (Remove hand, Capturing, Captured) ──
+        self.banner_text = ""
+        self.banner_type = ""
 
         # ── Lead time tracking ────────────────────────────────────
         self.panel_start_time     = None          # when panel first detected
@@ -876,6 +920,8 @@ class PanelDetectionState:
         # Reset landscape alert for new panel
         self.landscape_alert     = ""
         self.landscape_alert_ts  = 0.0
+        self.banner_text         = ""
+        self.banner_type         = ""
         self._seq2_cap_announced = False
         self._seq3_cap_announced = False
         self._seq2_prompted      = False
@@ -1174,7 +1220,9 @@ def allocate_panel_folder_for_seq1(serial_present=False):
         print(f"[SEQ1-FOLDER]    Current sequence: {state.current_sequence}")
         if _CAM2_OCR_AVAILABLE and camera2_ocr_instance is not None:
             camera2_ocr_instance.set_panel_folder(state.current_sequence_panel_folder)
-            print(f"[SEQ1-FOLDER]    Camera-2 folder assigned")
+            camera2_ocr_instance.start_ocr()
+            state.ocr_started = True
+            print(f"[SEQ1-FOLDER]    Camera-2 folder assigned & OCR started")
 
     return state.current_sequence_panel_folder
 
@@ -1228,6 +1276,10 @@ def rename_panel_images(folder, serial):
                     os.rename(old_path, new_path)
                     print(f"  [RENAME] {basename} → {new_basename}")
                     renamed_count += 1
+                else:
+                    os.replace(old_path, new_path)
+                    print(f"  [RENAME] {basename} → {new_basename} (replaced)")
+                    renamed_count += 1
             except Exception as e:
                 print(f"  [RENAME ERR] {basename}: {e}")
 
@@ -1241,6 +1293,10 @@ def rename_panel_images(folder, serial):
                     os.rename(old_path, new_path)
                     print(f"  [RENAME] {basename} → {new_basename}")
                     renamed_count += 1
+                else:
+                    os.replace(old_path, new_path)
+                    print(f"  [RENAME] {basename} → {new_basename} (replaced)")
+                    renamed_count += 1
             except Exception as e:
                 print(f"  [RENAME ERR] {basename}: {e}")
 
@@ -1253,6 +1309,10 @@ def rename_panel_images(folder, serial):
                 if not os.path.exists(new_path):
                     os.rename(old_path, new_path)
                     print(f"  [RENAME] {basename} → {new_basename}")
+                    renamed_count += 1
+                else:
+                    os.replace(old_path, new_path)
+                    print(f"  [RENAME] {basename} → {new_basename} (replaced)")
                     renamed_count += 1
             except Exception as e:
                 print(f"  [RENAME ERR] {basename}: {e}")
@@ -1361,7 +1421,7 @@ def capture_sequence_images(cap_data, sequence_id, serial_number):
                 print(f"  ❌ SEQ{sequence_id}: frame still NOT landscape "
                       f"({fw}×{fh}) after rotation — skipped")
                 return None
-            full_path = os.path.join(folder, f"{safe_s}_Seq{sequence_id}_Full_{ts}.jpg")
+            full_path = os.path.join(folder, f"{safe_s}_sequence_{sequence_id}.jpg")
             if _save(full_path, frame):
                 saved['main'] = full_path
                 size_kb = os.path.getsize(full_path) // 1024
@@ -1373,7 +1433,7 @@ def capture_sequence_images(cap_data, sequence_id, serial_number):
             return saved
 
         # ── Step 2: Save full-resolution landscape frame (SEQ1 only) ─────
-        full_path = os.path.join(folder, f"{safe_s}_Seq{sequence_id}_Full_{ts}.jpg")
+        full_path = os.path.join(folder, f"{safe_s}_sequence_{sequence_id}.jpg")
         if _save(full_path, frame):
             saved['main'] = full_path
             size_kb = os.path.getsize(full_path) // 1024
@@ -2305,6 +2365,7 @@ def update_wiping(hand_present, motion):
 
     # ── ALL ZONES: hand-free delay before capture ────────────────────
     is_captured = getattr(state, f'seq{cur}_auto_captured', False)
+    cur_delay = get_capture_delay(cur)
     
     if not is_captured:
         _multi = getattr(state, 'multiple_panels_visible', False)
@@ -2312,25 +2373,32 @@ def update_wiping(hand_present, motion):
             # Hand is absent AND panel is flat — start or continue the delay timer
             if state.seq_hand_free_since[cur] is None:
                 state.seq_hand_free_since[cur] = now
-                print(f'[SEQ{cur}-DELAY] Condition met — starting {CAPTURE_DELAY_SECS}s capture delay timer')
+                print(f'[SEQ{cur}-DELAY] Condition met — starting {cur_delay}s capture delay timer')
             state.seq_phase[cur] = 'hand_clear'
             elapsed_free = now - state.seq_hand_free_since[cur]
             # Update status with countdown
-            remaining = max(0.0, CAPTURE_DELAY_SECS - elapsed_free)
+            remaining = max(0.0, cur_delay - elapsed_free)
             if remaining > 0:
-                state.status_msg = f"SEQ{cur} — Hold still... {remaining:.1f}s"
+                state.status_msg = f"SEQ{cur} — Remove hand... Capturing in {remaining:.1f}s"
+                state.banner_type = "alert-red"
+                state.banner_text = f"✋ REMOVE YOUR HAND — CAPTURING SEQ {cur} IN {remaining:.1f}s | தயவுசெய்து கையை எடுக்கவும்"
             else:
-                state.status_msg = f'SEQ{cur} — Capturing...'
+                state.status_msg = f'SEQ{cur} — Capturing photo...'
+                state.banner_type = "alert-red"
+                state.banner_text = f"📸 CAPTURING SEQ {cur} PHOTO... | படம் எடுக்கப்படுகிறது..."
         else:
             # Hand is present or panel is tilted — reset the delay timer
             if state.seq_hand_free_since[cur] is not None:
                 print(f'[SEQ{cur}-DELAY] Condition broken (hand={hand_present}, multi={_multi}) — resetting capture delay timer')
             state.seq_hand_free_since[cur] = None
             state.seq_phase[cur] = 'waiting_class'
+            state.banner_type = "alert-red"
             if _multi:
                 state.status_msg = f'SEQ{cur} — Lay panel flat (multiple zones seen)'
+                state.banner_text = f"⚠️ LAY PANEL FLAT FOR SEQ {cur} | பேனலை சரியாக வைக்கவும்"
             else:
                 state.status_msg = f'SEQ{cur} — Remove hand for capture'
+                state.banner_text = f"✋ PLEASE REMOVE YOUR HAND FOR SEQ {cur} CAPTURE | கையை எடுக்கவும்"
 
     # ── SEQ2/SEQ3: progress bar driven by post-capture wipe time ─
     if cur in (2, 3):
@@ -2358,13 +2426,14 @@ def update_wiping(hand_present, motion):
                     state.wiping_active = False
 
             # Progress = accumulated wipe time / total bar duration
+            seq_target = get_wipe_duration(cur)
             wipe_secs = state.post_capture_wipe_secs.get(cur, 0.0)
-            state.progress = min(100, int((wipe_secs / PROGRESS_BAR_DURATION_SECS) * 100))
+            state.progress = min(100, int((wipe_secs / seq_target) * 100))
             state.cleaning_percentage = float(state.progress)
 
             if getattr(state, '_last_debug_print', 0) < now - 1.0:
                 print(f'[DEBUG] SEQ{cur} Post-capture wipe: {state.progress}% '
-                      f'({wipe_secs:.1f}s / {PROGRESS_BAR_DURATION_SECS}s)')
+                      f'({wipe_secs:.1f}s / {seq_target:.1f}s)')
                 state._last_debug_print = now
 
             pct_rem = 100 - state.progress
@@ -2399,8 +2468,9 @@ def update_wiping(hand_present, motion):
         if getattr(state, 'last_wiping_time', None) is not None:
             elapsed = now - state.last_wiping_time
             if elapsed < 2.0 and cur == 1:
+                seq1_target = get_wipe_duration(1)
                 state.total_wipe_seconds = min(
-                    PROGRESS_BAR_DURATION_SECS,
+                    seq1_target,
                     getattr(state, 'total_wipe_seconds', 0.0) + elapsed)
         state.last_wiping_time = now
 
@@ -2408,16 +2478,19 @@ def update_wiping(hand_present, motion):
             # SEQ1 progress bar driven by wipe seconds (only after capture)
             is_cap1 = getattr(state, 'seq1_auto_captured', False)
             if is_cap1:
+                seq1_target = get_wipe_duration(1)
                 state.progress = min(100, int(
-                    (state.total_wipe_seconds / PROGRESS_BAR_DURATION_SECS) * 100))
+                    (state.total_wipe_seconds / seq1_target) * 100))
                 state.cleaning_percentage = float(state.progress)
             else:
                 state.progress = 0
                 state.cleaning_percentage = 0.0
 
             if getattr(state, '_last_debug_print', 0) < now - 1.0:
+                seq1_target = get_wipe_duration(1)
                 print(f'[DEBUG] SEQ1 Wipe: {state.progress}% '
-                      f'({state.total_wipe_seconds:.1f}s / {PROGRESS_BAR_DURATION_SECS:.1f}s)')
+                      f'({state.total_wipe_seconds:.1f}s / {seq1_target:.1f}s)')
+                state._last_debug_print = now
                 state._last_debug_print = now
 
             state.seq1_wiping_frames += 1
@@ -2753,6 +2826,17 @@ def _draw_overlay_internal(frame, seq, status, progress):
         except Exception:
             pass
 
+    # Top banner bar on video feed (red for remove hand / countdown, green for captured)
+    banner_txt = getattr(state, 'banner_text', '')
+    banner_typ = getattr(state, 'banner_type', '')
+    if banner_txt:
+        disp_txt = banner_txt.split('|')[0].strip()
+        bg_col = (0, 0, 210) if 'red' in banner_typ else (0, 180, 50) if 'captured' in banner_typ else (0, 100, 255)
+        bar_h = max(36, int(fh * 0.07))
+        cv2.rectangle(frame, (0, 0), (fw, bar_h), bg_col, -1)
+        font_s = max(0.5, fw / 1200.0)
+        cv2.putText(frame, disp_txt, (15, int(bar_h * 0.7)), _FONT, font_s, (255, 255, 255), 2, cv2.LINE_AA)
+
     return frame
 
 
@@ -2905,9 +2989,10 @@ def _process_frame_internal(frame, detections):
         # ── NEW: hand-free delay gate ────────────────────────────────
         _delay_satisfied = False
         _hand_free_elapsed = 0.0
+        seq1_delay = get_capture_delay(1)
         if state.seq_hand_free_since[1] is not None:
             _hand_free_elapsed = time.time() - state.seq_hand_free_since[1]
-            _delay_satisfied   = (_hand_free_elapsed >= CAPTURE_DELAY_SECS)
+            _delay_satisfied   = (_hand_free_elapsed >= seq1_delay)
 
         if serial_det is not None:
             state.seq1_serial_stable_count = getattr(state, 'seq1_serial_stable_count', 0) + 1
@@ -2919,20 +3004,17 @@ def _process_frame_internal(frame, detections):
             print(f"[SEQ1-DET] Frame {state.frame_count}: Panel detected (conf={raw_seq_id})")
 
         should_capture = False
-        # NORMAL: consecutive clean frames WITH serial_no AND delay satisfied
-        if _delay_satisfied and getattr(state, 'seq1_serial_stable_count', 0) >= SEQ1_NORMAL_FRAMES:
+        # Delay satisfied AND 2 stable frames
+        if _delay_satisfied and (state.seq1_detection_count >= 2 or getattr(state, 'seq1_serial_stable_count', 0) >= 2):
             should_capture = True
-            print(f"[SEQ1-DET] ✅ Frame {state.frame_count}: Panel + Serial stable for {SEQ1_NORMAL_FRAMES} frames "
+            print(f"[SEQ1-DET] ✅ Frame {state.frame_count}: Panel stable for 2 frames "
                   f"+ {_hand_free_elapsed:.1f}s hand-free — capturing")
             print(f"[SEQ1-DET]    current_sequence: {state.current_sequence}")
-        # FALLBACK: consecutive clean frames WITHOUT serial_no AND delay satisfied
-        elif _delay_satisfied and state.seq1_detection_count >= SEQ1_FALLBACK_FRAMES:
-            should_capture = True
-            print(f"[SEQ1-DET] ⚠️ Frame {state.frame_count}: {SEQ1_FALLBACK_FRAMES} frames without serial_no "
-                  f"(hand free {_hand_free_elapsed:.1f}s) — triggering fallback")
         elif not _delay_satisfied:
-            remaining = CAPTURE_DELAY_SECS - _hand_free_elapsed
-            state.status_msg = f"SEQ1 — Hold still... {remaining:.1f}s"
+            remaining = max(0.0, seq1_delay - _hand_free_elapsed)
+            state.status_msg = f"SEQ1 — Remove hand... Capturing in {remaining:.1f}s"
+            state.banner_type = "alert-red"
+            state.banner_text = f"✋ REMOVE YOUR HAND — CAPTURING SEQ 1 IN {remaining:.1f}s | தயவுசெய்து கையை எடுக்கவும்"
 
         if should_capture and state.seq1_snapshot_data is None:
             frame_sharp = cv2.Laplacian(
@@ -3103,7 +3185,11 @@ def _process_frame_internal(frame, detections):
         state.seq1_auto_captured = True   # mark immediately — no repeated attempts
         ok = capture(1, state.seq1_snapshot_data['frame'], metadata=state.seq1_snapshot_data)
         if ok:
-            print("[CAPTURE] SEQ1 ✅ — full frame + crops saved")
+            print("[CAPTURE] SEQ1 ✅ — full frame saved as sequence_1.jpg")
+            state.banner_type = "alert-captured"
+            state.banner_text = "✅ SEQUENCE 1 CAPTURED — START WIPING | படம் எடுக்கப்பட்டது — துடைக்கவும்"
+            state.landscape_alert = "captured"
+            state.landscape_alert_ts = time.time()
         else:
             print("[CAPTURE] SEQ1 ❌ — capture_sequence_images failed "
                   "(check folder, disk space, frame validity)")
@@ -3193,9 +3279,10 @@ def _process_frame_internal(frame, detections):
                     if not _in_grace_period and not hand_present and not getattr(state, 'multiple_panels_visible', False) and _is_stable:
                         # ── NEW: hand-free delay gate ────────────────────────
                         _delay_satisfied = False
+                        seq2_delay = get_capture_delay(2)
                         if state.seq_hand_free_since[2] is not None:
                             _hand_free_elapsed = time.time() - state.seq_hand_free_since[2]
-                            if _hand_free_elapsed >= CAPTURE_DELAY_SECS:
+                            if _hand_free_elapsed >= seq2_delay:
                                 _delay_satisfied = True
 
                         if _delay_satisfied:
@@ -3227,6 +3314,10 @@ def _process_frame_internal(frame, detections):
                                     state.seq2_auto_captured = True
                                     state.seq2_capture_time = now
                                     state.seq_capture_data[2] = _best
+                                    state.banner_type = "alert-captured"
+                                    state.banner_text = "✅ SEQUENCE 2 CAPTURED — START WIPING | படம் எடுக்கப்பட்டது — துடைக்கவும்"
+                                    state.landscape_alert = "captured"
+                                    state.landscape_alert_ts = now
                                 else:
                                     print('[SEQ2] ⚠️ No best_frame yet — deferring 1 more frame')
 
@@ -3328,9 +3419,10 @@ def _process_frame_internal(frame, detections):
 
             # ── NEW: hand-free delay gate ────────────────────────
             _delay_satisfied = False
+            seq3_delay = get_capture_delay(3)
             if state.seq_hand_free_since[3] is not None:
                 _hand_free_elapsed = time.time() - state.seq_hand_free_since[3]
-                if _hand_free_elapsed >= CAPTURE_DELAY_SECS:
+                if _hand_free_elapsed >= seq3_delay:
                     _delay_satisfied = True
 
             if _delay_satisfied and _is_landscape and _is_stable and _is_big_enough:
@@ -3398,6 +3490,10 @@ def _process_frame_internal(frame, detections):
                                 state.seq3_auto_captured = True
                                 state.seq3_capture_time = time.time()
                                 state.seq_capture_data[3] = _best3
+                                state.banner_type = "alert-captured"
+                                state.banner_text = "✅ SEQUENCE 3 CAPTURED — START WIPING | படம் எடுக்கப்பட்டது — துடைக்கவும்"
+                                state.landscape_alert = "captured"
+                                state.landscape_alert_ts = time.time()
                             else:
                                 print('[SEQ3] ⚠️ No best_frame yet — deferring 1 more frame')
                 else:
@@ -5945,10 +6041,13 @@ def sequence_status():
         state.landscape_alert_ts  = time.time()
         # Voice removed per user request — no "captured" announcement
 
-    # Auto-clear "captured" green banner after 3 seconds
-    elif (state.landscape_alert == "captured"
-            and time.time() - state.landscape_alert_ts > 3.0):
+    # Auto-clear "captured" green banner after 2.5 seconds
+    elif ((state.landscape_alert == "captured" or state.banner_type == "alert-captured")
+            and time.time() - state.landscape_alert_ts > 2.5):
         state.landscape_alert = ""
+        if state.banner_type == "alert-captured":
+            state.banner_type = ""
+            state.banner_text = ""
 
     return jsonify({
         "sequence": state.current_sequence,
@@ -5993,6 +6092,8 @@ def sequence_status():
         # ── Landscape placement alert (voice + UI colour) ──────────
         # "" = nothing | "seq2" = orange | "seq3" = blue | "captured" = green
         'landscape_alert':     getattr(state, 'landscape_alert', ''),
+        'banner_text':         getattr(state, 'banner_text', ''),
+        'banner_type':         getattr(state, 'banner_type', ''),
         # Camera-2 fields — needed by UI auto-reconnect on page refresh
         'cam2_active':         bool(_camera2_url),
         'cam2_url':            _camera2_url or '',
