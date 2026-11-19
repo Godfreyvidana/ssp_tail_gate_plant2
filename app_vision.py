@@ -2352,7 +2352,7 @@ def update_seq(new_seq):
                     print('[CAM2-OCR] ⚠️  SEQ2 started but OCR NOT done — '
                           'keeping OCR alive to finish 3-slot capture + interval frames')
 
-def update_wiping(hand_present, motion):
+def update_wiping(hand_present, motion, frame=None):
     """
     Unified wipe tracking with new sequence flow:
 
@@ -2408,22 +2408,26 @@ def update_wiping(hand_present, motion):
             else:
                 state.status_msg = f'SEQ{cur} — Capturing photo...'
                 # Timer reached 0 — capture and store photo immediately!
-                if cur == 1 and not state.seq1_auto_captured:
-                    state.seq1_snapshot_data = {'frame': frame.copy(), 'rect': getattr(state, 'panel_rect', None)}
-                    ok = capture(1, frame, metadata=state.seq1_snapshot_data)
-                    if ok:
-                        setattr(state, 'seq1_auto_captured', True)
-                        state.sequence_captured[1] = True
-                        state.seq1_capture_time = now
-                        print(f"[SEQ1-DELAY] ✅ Delay finished — captured & stored sequence_1.jpg!")
-                elif cur in (2, 3) and not getattr(state, f'seq{cur}_auto_captured', False):
-                    ok = capture(cur, frame)
-                    if ok:
-                        setattr(state, f'seq{cur}_auto_captured', True)
-                        state.sequence_captured[cur] = True
-                        if cur == 2: state.seq2_capture_time = now
-                        if cur == 3: state.seq3_capture_time = now
-                        print(f"[SEQ{cur}-DELAY] ✅ Delay finished — captured & stored sequence_{cur}.jpg!")
+                cap_frame = frame if frame is not None else getattr(state, 'orig_frame', None) or getattr(state, 'orig', None)
+                if cap_frame is not None:
+                    if cur == 1 and not state.seq1_auto_captured:
+                        state.seq1_snapshot_data = {'frame': cap_frame.copy(), 'rect': getattr(state, 'panel_rect', None)}
+                        ok = capture(1, cap_frame, metadata=state.seq1_snapshot_data)
+                        if ok:
+                            setattr(state, 'seq1_auto_captured', True)
+                            state.sequence_captured[1] = True
+                            state.seq1_capture_time = now
+                            print(f"[SEQ1-DELAY] ✅ Delay finished — captured & stored sequence_1.jpg!")
+                    elif cur in (2, 3) and not getattr(state, f'seq{cur}_auto_captured', False):
+                        ok = capture(cur, cap_frame)
+                        if ok:
+                            setattr(state, f'seq{cur}_auto_captured', True)
+                            state.sequence_captured[cur] = True
+                            if cur == 2: state.seq2_capture_time = now
+                            if cur == 3: state.seq3_capture_time = now
+                            print(f"[SEQ{cur}-DELAY] ✅ Delay finished — captured & stored sequence_{cur}.jpg!")
+                else:
+                    print(f"[SEQ{cur}-DELAY] ⚠️ Cannot capture: frame is None")
         else:
             # Hand is present or panel is tilted — reset the delay timer
             if state.seq_hand_free_since[cur] is not None:
@@ -2896,6 +2900,9 @@ def _process_frame_internal(frame, detections):
     if frame is None:
         return None
 
+    state.orig = frame
+    state.orig_frame = frame
+
     h, w = frame.shape[:2]
 
     # ── 1. Filter detections ─────────────────────────────────────
@@ -3344,7 +3351,7 @@ def _process_frame_internal(frame, detections):
                             _fire_threshold = 3   # 3 stable landscape frames = capture immediately
                             if state.seq2_landscape_count >= _fire_threshold:
                                 # ── IMMEDIATE CAPTURE on stable landscape detection ──
-                                _best = state.seq2_best_frame
+                                _best = state.seq2_best_frame if state.seq2_best_frame is not None else frame.copy()
                                 if _best is not None:
                                     print(f'[SEQ2] ✅ {_fire_threshold} stable landscape frames — capturing NOW')
                                     capture(2, _best, metadata=state.seq2_best_meta or {})
@@ -3484,9 +3491,10 @@ def _process_frame_internal(frame, detections):
                     # first clear landscape frames were silently rejected and
                     # seq3_best_frame stayed None → all fallbacks failed → SEQ3
                     # image was never saved.
-                    if (not _wipe_started
-                            and _det_conf >= 0.30
-                            and frame_sharp > state.seq3_best_sharp):
+                    if (state.seq3_best_frame is None
+                            or (not _wipe_started
+                                and _det_conf >= 0.30
+                                and frame_sharp > state.seq3_best_sharp)):
                         state.seq3_best_frame = frame.copy()
                         state.seq3_best_sharp = frame_sharp
                         state.seq3_best_meta  = {
@@ -3520,7 +3528,7 @@ def _process_frame_internal(frame, detections):
                                 print('[SEQ3] ⚠️ SEQ3 ready but SEQ2 has no landscape frame')
                         # ── IMMEDIATE CAPTURE on stable landscape detection ──
                         if not state.seq3_auto_captured:
-                            _best3 = state.seq3_best_frame
+                            _best3 = state.seq3_best_frame if state.seq3_best_frame is not None else frame.copy()
                             if _best3 is not None:
                                 print(f'[SEQ3] ✅ {_fire_threshold} stable landscape frames — capturing NOW')
                                 capture(3, _best3, metadata=state.seq3_best_meta or {})
@@ -3636,7 +3644,7 @@ def _process_frame_internal(frame, detections):
         if state.cleaned_mask is None or state.cleaned_mask.shape != wiping_pixel.shape:
             state.cleaned_mask = np.zeros_like(wiping_pixel)
         state.cleaned_mask = cv2.bitwise_or(state.cleaned_mask, wiping_pixel)
-    update_wiping(hand_present, motion)
+    update_wiping(hand_present, motion, frame=frame)
 
 
 
