@@ -282,6 +282,9 @@ def get_wipe_duration(seq_id):
         except Exception: pass
     return float(APP_CONFIG.get('progress_bar_duration_secs', PROGRESS_BAR_DURATION_SECS))
 
+def get_part_removal_delay():
+    return float(APP_CONFIG.get('part_removal_delay_secs', APP_CONFIG.get('cycle_removal_delay_secs', 1.0)))
+
 if os.path.exists(_config_path_early):
     try:
         import json as _json_early
@@ -692,6 +695,7 @@ class PanelDetectionState:
         self.today_date           = datetime.now().strftime("%Y-%m-%d")
         self.panel_count_today    = self._load_daily_count()
         self.all_sequences_done   = False
+        self.waiting_for_part_removal = False
         self._last_raw            = -1
         self._last_stable         = 0
 
@@ -788,6 +792,7 @@ class PanelDetectionState:
         self.wiping_active       = False
         self.ocr_candidates      = []
         self.all_sequences_done  = False
+        self.waiting_for_part_removal = False
         self.panel_contour       = None
         self.panel_rect          = None
         self.panel_mask          = None
@@ -1562,8 +1567,9 @@ def _finalize_panel():
         print(f"[COUNT] Save error: {_ce}")
     state.current_sequence    = 0
     state.panel_end_time      = time.time()
+    state.waiting_for_part_removal = True
     state.banner_type         = "alert-captured"
-    state.banner_text         = "🎉 ALL SEQUENCES COMPLETED & VERIFIED ✓ — PANEL COMPLETE | அனைத்து வரிசைகளும் முடிந்தது"
+    state.banner_text         = "🎉 ALL SEQUENCES COMPLETED ✓ — PLEASE REMOVE FINISHED PART FROM TABLE | மேசையிலிருந்து பாகத்தை எடுக்கவும்"
     state.landscape_alert     = "captured"
     state.landscape_alert_ts  = time.time()
 
@@ -1745,18 +1751,11 @@ def _finalize_panel():
 
     threading.Thread(target=_bg, daemon=True).start()
 
-    # Reset UI after a short delay so operator sees "COMPLETED" briefly.
-    # Guard with reset_id snapshot: if a new panel arrives in <2s,
-    # process_frame already called reset_panel() — don't reset again or
-    # it will clear the new panel's serial mid-detection (Bug 3).
-    _reset_id_at_finalize = state.panel_reset_id
-    def _delayed_reset():
-        time.sleep(2.0)
-        if state.panel_reset_id == _reset_id_at_finalize:
-            reset_panel()
-        else:
-            print("[RESET] Delayed reset skipped — new panel already started")
-    threading.Thread(target=_delayed_reset, daemon=True).start()
+    # Part Removal Interlock: do NOT reset with blind timer!
+    # System waits in the previous completed cycle until the operator physically
+    # removes the finished part from the table, preventing duplicate cycles.
+    state.waiting_for_part_removal = True
+    print("[FINALISE] Cycle completed. Waiting for finished part to be removed from table before resetting.")
 
 
 def advance_sequence():
@@ -3569,20 +3568,45 @@ def _process_frame_internal(frame, detections):
 
     # ── SEQ3 Fallbacks Removed to Enforce 15s Logic in update_wiping ──
 
+    # ── Part Removal Interlock (Prevent duplicate cycle until finished part removed) ──
+    if getattr(state, 'waiting_for_part_removal', False):
+        removal_delay_secs = get_part_removal_delay()
+        required_absent_frames = max(10, int(removal_delay_secs * 25.0))
+        absent_cnt = getattr(state, 'panel_absent_frames', 0)
+
+        # Check if table is empty: finished panel physically removed
+        if best_any_panel is None and absent_cnt >= required_absent_frames:
+            print(f"[PIPELINE] 🏁 Finished part removed from table (absent {absent_cnt} frames >= {required_absent_frames}). Table clear — resetting for new panel.")
+            state.waiting_for_part_removal = False
+            reset_panel()
+            state.banner_type = "alert-captured"
+            state.banner_text = "🟢 TABLE READY — PLACE NEXT PART TO START | அடுத்த பாகத்தை வைக்கவும்"
+        else:
+            # Finished part is still present on the table — stay locked in previous cycle!
+            # Keep completion banner visible and block any sequence triggers.
+            state.banner_type = "alert-captured"
+            state.banner_text = "🎉 ALL SEQUENCES COMPLETED ✓ — REMOVE PART FROM TABLE | மேசையிலிருந்து பாகத்தை எடுக்கவும்"
+            out = apply_blue_tint(frame.copy(), state.panel_mask, state.cleaned_mask)
+            out = draw_overlay(out, state.current_sequence, state.status_msg, state.progress)
+            return out
+
     # ── 8. State Machine & Sequence Transitions ───────────────────
     # [RULE] RESET MUST HAPPEN BEFORE update_seq() — so any new panel's
     # SEQ1 initialises with a completely clean state and doesn't inherit
     # timers, wipe%, or completed flags from the previous panel.
     #
     # Reset when panel_seq1 arrives:
-    #   - Case A: all_sequences_done=True → normal end-of-cycle reset.
+    #   - Case A: all_sequences_done=True → normal end-of-cycle reset (only if panel removed).
     #   - Case B: On SEQ2/SEQ3, panel_seq1 re-appears → panel swap.
     #             B1: was_absent_long (>30 frames) — definitive removal.
     #             B2: any absence (≥5 frames) + we are on SEQ2/SEQ3 — fast swap.
     if conf_seq == 1:
         if getattr(state, 'all_sequences_done', False):
-            print("[PIPELINE] Cycle complete + panel_seq1 detected — resetting for new panel.")
-            reset_panel()
+            absent = getattr(state, 'panel_absent_frames', 0)
+            if absent >= 15 or getattr(state, 'was_absent_long', False):
+                print("[PIPELINE] Cycle complete + panel_seq1 detected after removal — resetting for new panel.")
+                reset_panel()
+                state.was_absent_long = False
         elif state.current_sequence in (2, 3):
             absent = getattr(state, 'panel_absent_frames', 0)
             was_absent_long = getattr(state, 'was_absent_long', False)

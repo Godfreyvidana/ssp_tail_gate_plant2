@@ -27,5 +27,6 @@
     "ocr_enable_mkldnn": false,
     "ocr_use_doc_orientation": false,
     "ocr_use_doc_unwarping": false,
-    "ocr_use_textline_orientation": false
+    "ocr_use_textline_orientation": false,
+    "part_removal_delay_secs": 1.0
 }
